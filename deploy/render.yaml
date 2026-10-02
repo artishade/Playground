@@ -1,0 +1,35 @@
+# Render — free Docker web service.
+#
+# Drop this file at the repo root (or paste the service settings in the
+# dashboard) and Render builds `terminal/Dockerfile`.
+#
+# The free plan is 750 instance hours per WORKSPACE per month, sleeps after
+# 15 minutes idle, and cold-starts in ~50–60 s. A 24/7 keep-warm pinger burns
+# ~720 of those 750 hours on one service — fine, but know the price. See
+# deploy/README.md.
+services:
+  - type: web
+    name: novarouter-terminal
+    runtime: docker
+    plan: free
+    region: singapore          # or oregon / frankfurt — pick the one nearest you
+    dockerfilePath: ./terminal/Dockerfile
+    dockerContext: ./terminal
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Shared secret. Without it anyone who finds the URL gets a root shell.
+      # Render generates a strong value; copy it into the app side too.
+      - key: NOVA_TERMINAL_TOKEN
+        generateValue: true
+      - key: NOVA_BUILD_ROOT
+        value: /app/build
+      # The agent's brain — any OpenAI-compatible /v1 endpoint. Leave unset and
+      # Agentbox stays off (the console says so) until you add a provider in the
+      # UI. Point it at Groq's free tier to have an agent on day one.
+      - key: NOVA_AGENTBOX_BASE_URL
+        sync: false
+      - key: NOVA_AGENTBOX_API_KEY
+        sync: false
+      - key: NOVA_AGENTBOX_MODEL
+        sync: false

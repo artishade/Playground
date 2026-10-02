@@ -1,0 +1,47 @@
+# Fly.io — not free anymore, but the cheapest way to get a *real* always-on
+# shell with a persistent volume, which is what a terminal actually wants.
+#
+#   fly launch --dockerfile terminal/Dockerfile --no-deploy
+#   fly volumes create nova_build --size 1
+#   fly secrets set NOVA_TERMINAL_TOKEN=$(openssl rand -hex 24)
+#   fly deploy
+#
+# `auto_stop_machines` is deliberately false: a terminal that sleeps is a
+# terminal that loses your shell mid-`apt install`. That is the whole reason to
+# pay ~$2–3/month here instead of living on a sleeping free tier.
+app = "novarouter-terminal"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NOVA_BUILD_ROOT = "/data/build"
+  NOVA_TERMINAL_HOST = "0.0.0.0"
+
+[[mounts]]
+  source = "nova_build"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3100
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 120
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

@@ -1,0 +1,9 @@
+# The standalone terminal image needs source only.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.DS_Store
+README.md
+# Deploy configs are consumed by the platforms, not baked into the image.
+deploy/

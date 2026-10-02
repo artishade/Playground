@@ -1,0 +1,625 @@
+"""Agentbox — the AI agent that ships with the terminal.
+
+A terminal hosted on its own is useless without a mind behind it: you want to
+type "deploy the site and tail the log", not just get a root prompt. Agentbox
+is that mind, and it lives in the terminal host — so **deploying only
+`terminal/` gives you the shells *and* the agent**, with no NovaRouter gateway,
+no database and no dashboard involved.
+
+    POST /agent/chat        {message, provider?, model?, history?} → the answer
+    GET/POST/DELETE /agent/providers   add and choose custom providers
+    GET  /agent/models      what a provider can think with
+
+The page that uses all of it — session tabs, a real shell, this agent — is
+`web/console.html`, served by the host at `/`.
+
+It talks to any OpenAI-compatible `/v1/chat/completions` endpoint — the free
+NovaFree engine, OpenAI, Groq, OpenRouter, a self-hosted vLLM, or a NovaRouter
+gateway's own `/v1`. Providers come from two places:
+
+  environment   NOVA_AGENTBOX_BASE_URL / _API_KEY / _MODEL  (id: `env`)
+  runtime       POST /agent/providers, saved to a private file next to the
+                workspace — so you can add Grok, OpenRouter and a local vLLM
+                side by side and pick one per chat
+
+No providers at all means the agent is off, not silently disabled-but-
+configured: the chat route answers 503 with `code: agentbox_unconfigured`,
+and `/health` says so. The terminal never makes an outbound call nobody asked
+for, and an API key is only ever echoed back masked.
+
+Every tool the agent has runs **in a real PTY tab you can watch** — the same
+ones `/terminal/pty/sessions` lists — so a task is visible while it happens and
+its shell state survives between steps.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
+from . import config
+from .link import TerminalError, current
+from .pty import agent_label
+
+log = logging.getLogger("terminal.agentbox")
+
+router = APIRouter()
+
+CALL_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=60.0, pool=30.0)
+MAX_TOOL_OUTPUT = 8000
+REPLY_HISTORY = 12          # messages kept per conversation
+ENV_PROVIDER_ID = "env"     # the provider built from NOVA_AGENTBOX_* variables
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+REGISTRY_LOCK = threading.Lock()   # the registry is a tiny file; keep writes sane
+
+SYSTEM_PROMPT = """You are Agentbox, the AI agent inside a NovaRouter terminal.
+
+You are working inside a real Linux shell on the user's machine. Every tool
+call you make is typed into a live terminal tab the user can watch, so:
+- prefer one command at a time, and read the output before deciding what is next;
+- state assumptions instead of guessing at paths you have not looked at;
+- if a command fails, diagnose it from its real output rather than retrying blindly.
+
+You have the whole toolbox of a root shell: inspect, edit, build, test, deploy.
+Do not claim something works until the output says so."""
+
+
+# --------------------------------------------------------------------------- #
+# Tools — every one of them lands in a terminal tab the user can watch
+# --------------------------------------------------------------------------- #
+
+
+def _schema(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {"type": "object", "properties": props, "required": required}
+
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run a shell command in the user's terminal and return its output and exit code.",
+            "parameters": _schema({
+                "command": {"type": "string", "description": "The command line to run."},
+            }, ["command"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the workspace.",
+            "parameters": _schema({
+                "path": {"type": "string", "description": "Absolute path, or one relative to the workspace."},
+                "max_bytes": {"type": "integer", "description": "Truncate after this many bytes (default 20000)."},
+            }, ["path"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create or overwrite a file in the workspace.",
+            "parameters": _schema({
+                "path": {"type": "string", "description": "Absolute path, or one relative to the workspace."},
+                "content": {"type": "string", "description": "The full file content."},
+            }, ["path", "content"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_sessions",
+            "description": "List the terminal tabs currently open, with their labels and working directories.",
+            "parameters": _schema({}, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish",
+            "description": "Give the user the final answer. Call this when the task is done.",
+            "parameters": _schema({
+                "summary": {"type": "string", "description": "What you did and what the user should know."},
+            }, ["summary"]),
+        },
+    },
+]
+
+
+def _resolve_path(raw: str) -> str:
+    """A path the agent may touch: absolute, or relative to the workspace."""
+    import os
+
+    from .config import build_root
+
+    path = (raw or "").strip()
+    if not path:
+        return str(build_root())
+    return path if os.path.isabs(path) else str(build_root() / path)
+
+
+async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
+    """One tool call. Everything that can be typed is typed into a real tab."""
+    if name == "run_command":
+        command = str(args.get("command") or "").strip()
+        if not command:
+            return {"error": "command is required"}
+        result = await current().run_command(command, label, config.AGENTBOX_STEP_TIMEOUT)
+        if result is None:
+            return {"error": "no terminal session is available"}
+        output, code = result
+        return {"exit_code": code, "output": output[:MAX_TOOL_OUTPUT]}
+
+    if name == "read_file":
+        import os
+
+        path = _resolve_path(str(args.get("path") or ""))
+        try:
+            size = int(args.get("max_bytes") or 20000)
+        except (TypeError, ValueError):
+            size = 20000
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return {"path": path, "content": fh.read(max(1024, size))}
+        except OSError as err:
+            return {"error": f"{err.strerror or err} ({path})"}
+
+    if name == "write_file":
+        import os
+
+        path = _resolve_path(str(args.get("path") or ""))
+        content = args.get("content")
+        if not isinstance(content, str):
+            return {"error": "content must be a string"}
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        except OSError as err:
+            return {"error": f"{err.strerror or err} ({path})"}
+        # The write is visible in the same tab, so the user sees the file land.
+        await current().run_command(f"ls -l {path}", label, 30)
+        return {"ok": True, "path": path, "bytes": len(content)}
+
+    if name == "list_sessions":
+        state = await current().snapshot()
+        return {"sessions": [
+            {"id": s["id"], "label": s["label"], "cwd": s.get("cwd")}
+            for s in (state.get("sessions") or [])
+        ]}
+
+    return {"error": f"unknown tool: {name}"}
+
+
+# --------------------------------------------------------------------------- #
+# Providers — the agent's custom model endpoints
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Provider:
+    """One OpenAI-compatible endpoint the agent can think with."""
+
+    id: str
+    base_url: str
+    api_key: str = ""
+    model: str = ""
+    label: str = ""
+    source: str = "saved"      # `env` | `saved` — where it came from
+
+    def public(self) -> dict:
+        """Never the raw key: a saved key is a credential, not a field."""
+        return {
+            "id": self.id,
+            "label": self.label or self.id,
+            "base_url": self.base_url,
+            "model": self.model or None,
+            "source": self.source,
+            "api_key": mask_key(self.api_key),
+            "has_key": bool(self.api_key),
+        }
+
+
+def mask_key(key: str) -> str:
+    """`sk-live-abcd…` → `sk-l…bcd`. Enough to recognise, useless to reuse."""
+    text = (key or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 8:
+        return "•" * len(text)
+    return f"{text[:3]}…{text[-3:]}"
+
+
+def registry_path():
+    """Where the saved providers live: private, and beside the workspace."""
+    raw = (config.AGENTBOX_PROVIDER_FILE or "").strip()
+    if raw:
+        from pathlib import Path
+
+        return Path(raw)
+    return config.build_root() / ".agentbox-providers.json"
+
+
+def _env_provider() -> Provider | None:
+    base = (config.AGENTBOX_BASE_URL or "").strip()
+    if not base:
+        return None
+    return Provider(id=ENV_PROVIDER_ID, base_url=base.rstrip("/"),
+                    api_key=config.AGENTBOX_API_KEY or "",
+                    model=config.AGENTBOX_MODEL or "", label="from environment",
+                    source="env")
+
+
+def load_providers() -> dict[str, Provider]:
+    """Every provider, keyed by id — the environment one plus the saved ones.
+
+    A saved provider may shadow the environment one by reusing its id (`env`),
+    which is how you repoint a baked-in endpoint without touching the deploy.
+    """
+    found: dict[str, Provider] = {}
+    if (env := _env_provider()) is not None:
+        found[env.id] = env
+    try:
+        raw = registry_path().read_text(encoding="utf-8")
+        stored = json.loads(raw)
+    except (OSError, ValueError):
+        return found
+    if not isinstance(stored, list):
+        return found
+    for entry in stored:
+        if not isinstance(entry, dict):
+            continue
+        base = str(entry.get("base_url") or "").strip()
+        pid = str(entry.get("id") or "").strip()
+        if not base or not ID_RE.match(pid):
+            continue
+        found[pid] = Provider(id=pid, base_url=base.rstrip("/"),
+                              api_key=str(entry.get("api_key") or ""),
+                              model=str(entry.get("model") or ""),
+                              label=str(entry.get("label") or "")[:40],
+                              source="env" if pid == ENV_PROVIDER_ID else "saved")
+    return found
+
+
+def save_providers(providers: list[Provider]) -> None:
+    """Persist the saved providers. The env one is never written to disk."""
+    path = registry_path()
+    with REGISTRY_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {"id": p.id, "label": p.label, "base_url": p.base_url,
+             "api_key": p.api_key, "model": p.model}
+            for p in providers if p.source != "env"
+        ]
+        # 0600: this file holds credentials, and the terminal runs as root.
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
+def upsert_provider(*, id: str, base_url: str, api_key: str = "",
+                    model: str = "", label: str = "") -> Provider:
+    """Add or update one custom provider, keeping every other one as it was."""
+    pid = (id or "").strip().lower()
+    if not ID_RE.match(pid):
+        raise ValueError("id must be 1–40 characters of a–z, 0–9, dot, dash, underscore")
+    base = (base_url or "").strip().rstrip("/")
+    if not base.lower().startswith(("http://", "https://")):
+        raise ValueError("base_url must start with http:// or https://")
+    clean_model = (model or "").strip()[:120]
+    clean_label = (label or "").strip()[:40]
+
+    existing = load_providers()
+    previous = existing.get(pid)
+    # An empty api_key means "keep the one already stored" — so editing a
+    # provider from the page does not have to re-type its credential.
+    key = (api_key or "").strip() or (previous.api_key if previous else "")
+    provider = Provider(id=pid, base_url=base, api_key=key, model=clean_model,
+                        label=clean_label,
+                        source="env" if pid == ENV_PROVIDER_ID else "saved")
+    keep = [p for p in existing.values() if p.id != pid]
+    save_providers([*keep, provider])
+    return provider
+
+
+def remove_provider(pid: str) -> bool:
+    """Forget a saved provider. The environment one cannot be removed."""
+    if pid == ENV_PROVIDER_ID:
+        raise ValueError(f"'{ENV_PROVIDER_ID}' comes from the environment — unset its variables")
+    existing = load_providers()
+    if pid not in existing:
+        return False
+    save_providers([p for p in existing.values() if p.id != pid])
+    return True
+
+
+def default_provider() -> Provider | None:
+    """Which provider a chat uses when the caller doesn't name one: the env
+    one when it exists (that is what the deployer configured), else the first
+    saved one — so an added provider is never unreachable."""
+    found = load_providers()
+    if ENV_PROVIDER_ID in found:
+        return found[ENV_PROVIDER_ID]
+    return next(iter(found.values()), None)
+
+
+def resolve_provider(pid: str | None) -> Provider | None:
+    found = load_providers()
+    if pid:
+        return found.get(pid.strip().lower())
+    return default_provider()
+
+
+# --------------------------------------------------------------------------- #
+# The model
+# --------------------------------------------------------------------------- #
+
+
+def _client(provider: Provider, transport: Any = None) -> httpx.AsyncClient:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    if provider.api_key:
+        headers["Authorization"] = f"Bearer {provider.api_key}"
+    return httpx.AsyncClient(base_url=provider.base_url, headers=headers,
+                             timeout=CALL_TIMEOUT, transport=transport,
+                             trust_env=False)
+
+
+def agentbox_status() -> dict:
+    """What `/health` reports about the agent — never a guess."""
+    providers = load_providers()
+    active = default_provider()
+    return {
+        "configured": bool(providers),
+        "providers": [p.id for p in providers.values()],
+        "active": active.id if active else None,
+        "model": active.model or None if active else None,
+        "endpoint": active.base_url if active else None,
+        "max_steps": config.AGENTBOX_MAX_STEPS,
+    }
+
+
+async def _resolve_model(provider: Provider, client: httpx.AsyncClient) -> str:
+    """An explicit model wins; otherwise take whatever the endpoint offers."""
+    if provider.model:
+        return provider.model
+    try:
+        res = await client.get("/models")
+        payload = res.json() if res.content else {}
+        listed = payload.get("data") if isinstance(payload, dict) else None
+        if isinstance(listed, list) and listed:
+            first = listed[0]
+            if isinstance(first, dict) and first.get("id"):
+                return str(first["id"])
+    except Exception:
+        pass
+    return "gpt-4o-mini"
+
+
+async def _chat(client: httpx.AsyncClient, model: str,
+                messages: list[dict[str, Any]], tools: bool = True) -> dict:
+    body: dict[str, Any] = {"model": model, "messages": messages}
+    if tools:
+        body["tools"] = TOOLS
+    res = await client.post("/chat/completions", json=body)
+    if res.status_code >= 400:
+        detail = res.text[:300].strip()
+        raise RuntimeError(f"model endpoint returned HTTP {res.status_code} ({detail})")
+    payload = res.json()
+    choices = payload.get("choices") or []
+    return choices[0].get("message") or {} if choices else {}
+
+
+def _tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    calls = message.get("tool_calls") or []
+    parsed: list[dict[str, Any]] = []
+    for call in calls:
+        fn = (call.get("function") or {}) if isinstance(call, dict) else {}
+        raw = fn.get("arguments")
+        if isinstance(raw, dict):
+            args = raw
+        else:
+            try:
+                args = json.loads(raw or "{}")
+            except ValueError:
+                args = {}
+        parsed.append({"id": call.get("id") or "", "name": str(fn.get("name") or ""),
+                       "args": args if isinstance(args, dict) else {}})
+    return parsed
+
+
+def agentbox_configured_response() -> JSONResponse | None:
+    """The 503 every agent route returns when nobody told it where to think."""
+    if load_providers():
+        return None
+    return JSONResponse(
+        {
+            "error": "Agentbox has no provider. Set NOVA_AGENTBOX_BASE_URL on this "
+                     "terminal host, or add one: POST /agent/providers.",
+            "code": "agentbox_unconfigured",
+        },
+        status_code=503,
+    )
+
+
+def _provider_error(pid: str) -> JSONResponse | None:
+    """A named provider that doesn't exist is a 404 that lists the real ones."""
+    if resolve_provider(pid) is not None:
+        return None
+    known = ", ".join(load_providers()) or "none configured"
+    return JSONResponse(
+        {"error": f"no provider '{pid}' (configured: {known})",
+         "code": "provider_not_found"},
+        status_code=404,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Routes
+# --------------------------------------------------------------------------- #
+
+
+async def _body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+@router.post("/chat")
+async def chat(request: Request):
+    """One turn (or a whole short task) of agent, with its steps visible."""
+    if (missing := agentbox_configured_response()) is not None:
+        return missing
+    body = await _body(request)
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return JSONResponse({"error": "message is required", "code": "bad_request"},
+                            status_code=400)
+
+    pid = body.get("provider") if isinstance(body.get("provider"), str) else ""
+    if (missing := _provider_error(pid)) is not None:
+        return missing
+    provider = resolve_provider(pid)
+    wanted_model = body.get("model") if isinstance(body.get("model"), str) else ""
+    if wanted_model.strip():
+        provider = Provider(**{**provider.__dict__, "model": wanted_model.strip()[:120]})
+
+    label = body.get("label") if isinstance(body.get("label"), str) else ""
+    label = label or agent_label(message)
+    history = body.get("history") if isinstance(body.get("history"), list) else []
+    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for turn in history[-REPLY_HISTORY:]:
+        if isinstance(turn, dict) and turn.get("role") in ("user", "assistant"):
+            messages.append({"role": turn["role"],
+                             "content": str(turn.get("content") or "")[:8000]})
+    messages.append({"role": "user", "content": message.strip()})
+
+    steps: list[dict[str, Any]] = []
+    async with _client(provider) as client:
+        try:
+            model = await _resolve_model(provider, client)
+            for _ in range(config.AGENTBOX_MAX_STEPS):
+                reply = await _chat(client, model, messages)
+                calls = _tool_calls(reply)
+                messages.append({k: v for k, v in reply.items() if v is not None})
+
+                if not calls:
+                    return {"ok": True, "model": model, "provider": provider.id,
+                            "reply": str(reply.get("content") or "").strip(),
+                            "steps": steps}
+
+                for call in calls:
+                    try:
+                        result = await run_tool(call["name"], call["args"], label)
+                    except TerminalError as err:
+                        result = {"error": str(err), "code": err.code}
+                    except Exception as err:            # a tool must never kill the run
+                        result = {"error": f"{err.__class__.__name__}: {err}"}
+                    steps.append({"tool": call["name"], "args": call["args"], "result": result})
+                    messages.append({"role": "tool", "tool_call_id": call["id"],
+                                     "content": json.dumps(result)[:MAX_TOOL_OUTPUT]})
+
+                    # `finish` is the agent's own "I am done" button; its summary
+                    # is the answer, and the loop ends whether or not the model
+                    # stops calling tools.
+                    if call["name"] == "finish":
+                        summary = str(call["args"].get("summary") or "").strip()
+                        return {"ok": True, "model": model, "provider": provider.id,
+                                "reply": summary or "Done.", "steps": steps}
+        except httpx.HTTPError as err:
+            return JSONResponse(
+                {"error": f"the model endpoint is not answering ({err.__class__.__name__}).",
+                 "code": "agentbox_unreachable"},
+                status_code=502,
+            )
+        except RuntimeError as err:
+            return JSONResponse({"error": str(err), "code": "agentbox_error"},
+                                status_code=502)
+
+    # The step budget ran out — say so honestly instead of pretending it worked.
+    return JSONResponse(
+        {"error": f"the agent hit its {config.AGENTBOX_MAX_STEPS}-step budget; "
+                  "raise NOVA_AGENTBOX_MAX_STEPS or ask for something smaller.",
+         "code": "agentbox_budget_exhausted", "steps": steps},
+        status_code=200,
+    )
+
+
+@router.get("/providers")
+async def list_providers():
+    """Every custom provider the agent can use, with keys masked."""
+    providers = load_providers()
+    active = default_provider()
+    return {
+        "ok": True,
+        "active": active.id if active else None,
+        "registry": str(registry_path()),
+        "providers": [{**p.public(), "active": bool(active and p.id == active.id)}
+                      for p in providers.values()],
+    }
+
+
+@router.post("/providers")
+async def add_provider(request: Request):
+    """Add or update a custom provider: any OpenAI-compatible /v1 endpoint."""
+    body = await _body(request)
+    try:
+        provider = upsert_provider(
+            id=str(body.get("id") or ""),
+            base_url=str(body.get("base_url") or ""),
+            api_key=str(body.get("api_key") or ""),
+            model=str(body.get("model") or ""),
+            label=str(body.get("label") or ""),
+        )
+    except ValueError as err:
+        return JSONResponse({"error": str(err), "code": "bad_request"}, status_code=400)
+    saved = [p.public() for p in load_providers().values()]
+    return {"ok": True, "provider": provider.public(), "providers": saved}
+
+
+@router.delete("/providers/{provider_id}")
+async def delete_provider(provider_id: str):
+    try:
+        removed = remove_provider(provider_id)
+    except ValueError as err:
+        return JSONResponse({"error": str(err), "code": "bad_request"}, status_code=400)
+    if not removed:
+        return JSONResponse({"error": f"no provider '{provider_id}'",
+                             "code": "provider_not_found"}, status_code=404)
+    return {"ok": True, "removed": provider_id,
+            "providers": [p.public() for p in load_providers().values()]}
+
+
+@router.get("/models")
+async def models(provider: str = ""):
+    """What a provider can think with, straight from that endpoint."""
+    if (missing := agentbox_configured_response()) is not None:
+        return missing
+    if (missing := _provider_error(provider)) is not None:
+        return missing
+    target = resolve_provider(provider)
+    async with _client(target) as client:
+        try:
+            res = await client.get("/models")
+        except httpx.HTTPError as err:
+            return JSONResponse({"error": f"unreachable ({err.__class__.__name__})",
+                                 "code": "agentbox_unreachable"}, status_code=502)
+    payload = res.json() if res.content else {}
+    listed = payload.get("data") if isinstance(payload, dict) else None
+    return {
+        "ok": True,
+        "provider": target.id,
+        "model": target.model or (listed[0].get("id") if listed else None),
+        "models": [m.get("id") for m in (listed or []) if isinstance(m, dict)][:100],
+    }

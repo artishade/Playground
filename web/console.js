@@ -1,0 +1,721 @@
+/**
+ * NovaRouter terminal console — the standalone workspace client.
+ *
+ * One page for a terminal that may be hosted with nothing else: the shell tabs
+ * on the left, Agentbox on the right, providers manageable in place. It talks
+ * to the same contract the dashboard uses (`terminal/api.py`) under the host's
+ * own `/terminal/pty` prefix, plus `/agent` for the AI side.
+ *
+ * Two rendering paths on purpose: xterm.js when the CDN is reachable (real
+ * emulation — colour, cursor, vim, top), and a plain append-only viewer when it
+ * is not, because a terminal that renders nothing the moment jsdelivr is
+ * blocked is not a terminal. Both accept the same keystrokes.
+ *
+ * The UI layer (theme, toasts, latency, shortcuts, mobile pane) is deliberately
+ * dependency-free: no framework, no build step, one file.
+ */
+(function (global) {
+  'use strict';
+
+  const API = '/terminal/pty';
+  const AGENT = '/agent';
+  const THEMES = ['obsidian', 'plasma', 'matrix', 'glacier', 'ember'];
+  // xterm cannot read CSS variables, so the terminal palette is mirrored here.
+  const TERM_THEMES = {
+    obsidian: { background: '#05060c', foreground: '#cbd5e1', cursor: '#7c5cff', selectionBackground: '#7c5cff40' },
+    plasma:   { background: '#0a0510', foreground: '#e6d9f5', cursor: '#ff3ea5', selectionBackground: '#ff3ea540' },
+    matrix:   { background: '#040a07', foreground: '#c8f7d6', cursor: '#3ee07f', selectionBackground: '#3ee07f40' },
+    glacier:  { background: '#040810', foreground: '#cfe3ff', cursor: '#38bdf8', selectionBackground: '#38bdf840' },
+    ember:    { background: '#0c0705', foreground: '#f6ddd0', cursor: '#fb923c', selectionBackground: '#fb923c40' },
+  };
+
+  const state = {
+    token: '',
+    sessions: [],
+    active: null,
+    offset: 0,
+    stream: null,
+    cols: 120,
+    rows: 32,
+    history: [],
+    providers: [],
+    provider: '',
+    pending: null,
+    max: 8,
+    theme: 'obsidian',
+    retry: 0,
+    online: null,
+  };
+
+  // ---- tiny DOM helper -----------------------------------------------------
+
+  const $ = (id) => document.getElementById(id);
+  const on = (el, name, fn) => el && el.addEventListener(name, fn);
+  const store = {
+    get(key, fallback) {
+      try { return global.localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
+    },
+    set(key, value) {
+      try { global.localStorage.setItem(key, value); } catch (e) { /* private mode */ }
+    },
+  };
+
+  // ---- toasts --------------------------------------------------------------
+
+  function toast(text, cls) {
+    const box = $('toasts');
+    if (!box) return;
+    const el = document.createElement('div');
+    el.className = 'toast ' + (cls || '');
+    el.textContent = String(text == null ? '' : text);
+    box.appendChild(el);
+    setTimeout(() => el.remove(), cls === 'err' ? 7000 : 3800);
+  }
+
+  function setLink(ok, text) {
+    const dot = $('dot');
+    const label = $('linkText');
+    if (dot) {
+      dot.classList.toggle('bad', ok === false);
+      dot.classList.toggle('warn', ok === null);
+      dot.classList.toggle('pulse', ok !== true);
+    }
+    if (label && text) label.textContent = text;
+  }
+
+  function say(who, text, cls) {
+    const box = $('log');
+    if (!box) return null;
+    const el = document.createElement('div');
+    el.className = 'msg ' + (cls || '');
+    const label = document.createElement('span');
+    label.className = 'who';
+    label.textContent = who;
+    el.appendChild(label);
+    const body = document.createElement('span');
+    body.innerHTML = cls === 'bot' || cls === 'you' ? renderLite(text) : escapeHtml(text);
+    el.appendChild(body);
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+    return el;
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Markdown-lite: fenced code blocks and inline `code`, everything else
+   * escaped verbatim. A full parser would be a dependency; this is the 95%
+   * that actually shows up in agent replies.
+   */
+  function renderLite(text) {
+    const raw = String(text == null ? '' : text);
+    const parts = raw.split(/```/);
+    let html = '';
+    parts.forEach((chunk, i) => {
+      if (i % 2 === 1) {
+        html += '<pre style="margin:8px 0;overflow:auto;white-space:pre-wrap">' + escapeHtml(chunk.replace(/^\w*\n/, '')) + '</pre>';
+      } else {
+        html += escapeHtml(chunk).replace(/`([^`\n]+)`/g, '<code style="opacity:.85">$1</code>');
+      }
+    });
+    return html;
+  }
+
+  // ---- transport -----------------------------------------------------------
+
+  function headers(extra) {
+    const out = Object.assign({ 'content-type': 'application/json' }, extra || {});
+    if (state.token) out['X-Nova-Terminal-Token'] = state.token;
+    return out;
+  }
+
+  async function api(path, options) {
+    const opts = Object.assign({}, options || {});
+    opts.headers = headers(opts.headers);
+    let res = await fetch(path, opts);
+    if (res.status === 401 && !state.pending) {
+      const token = askToken();                 // the host gates root shells
+      if (token) {
+        state.token = token;
+        opts.headers = headers();
+        res = await fetch(path, opts);
+      }
+    }
+    return res;
+  }
+
+  async function json(path, options) {
+    const res = await api(path, options);
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, body };
+  }
+
+  function askToken() {
+    if (typeof prompt !== 'function') return '';
+    const token = prompt('This terminal host requires its shared secret\n(NOVA_TERMINAL_TOKEN):', state.token || '');
+    if (token) store.set('nova_terminal_token', token);
+    return token || '';
+  }
+
+  function rememberToken() {
+    state.token = store.get('nova_terminal_token', '');
+  }
+
+  // ---- theme ---------------------------------------------------------------
+
+  function applyTheme(name) {
+    state.theme = THEMES.indexOf(name) >= 0 ? name : 'obsidian';
+    document.documentElement.setAttribute('data-theme', state.theme);
+    const pick = $('theme');
+    if (pick) pick.value = state.theme;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', TERM_THEMES[state.theme].background);
+    if (screen.term && screen.term.options) {
+      screen.term.options.theme = TERM_THEMES[state.theme];
+      screen.term.refresh && screen.term.refresh(0, state.rows);
+    }
+    store.set('nova_terminal_theme', state.theme);
+  }
+
+  // ---- the shell screen ----------------------------------------------------
+
+  const screen = {
+    term: null,
+    plain: null,
+    write(data) {
+      if (this.term) { this.term.write(data); return; }
+      if (this.plain) { this.plain.textContent += data; this.plain.scrollTop = this.plain.scrollHeight; }
+    },
+    resize(cols, rows) {
+      state.cols = cols;
+      state.rows = rows;
+      if (this.term && this.term.resize) this.term.resize(cols, rows);
+    },
+    clear() {
+      if (this.term && this.term.clear) this.term.clear();
+      if (this.plain) this.plain.textContent = '';
+    },
+    focus() { if (this.term && this.term.focus) this.term.focus(); },
+    fit() { if (this.term && this.term._fit) this.term._fit.fit(); },
+  };
+
+  function buildTerminal() {
+    const host = $('screen');
+    if (!host) return;
+    const TerminalCtor = global.Terminal;
+    if (TerminalCtor) {
+      screen.term = new TerminalCtor({
+        convertEol: false,
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        fontSize: 13,
+        lineHeight: 1.25,
+        fontFamily: 'ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace',
+        scrollback: 5000,
+        allowProposedApi: true,
+        theme: TERM_THEMES[state.theme],
+      });
+      screen.term.open(host);
+      if (global.FitAddon) {
+        screen.term._fit = new global.FitAddon.FitAddon();
+        screen.term.loadAddon(screen.term._fit);
+        screen.term._fit.fit();
+      }
+      screen.term.onData((data) => send(data));
+    } else {
+      // No CDN: still a usable terminal, just without emulation.
+      const note = document.createElement('div');
+      note.className = 'screen-note';
+      note.textContent = 'xterm.js unavailable — plain viewer (no colour, no full-screen apps)';
+      host.appendChild(note);
+      const pre = document.createElement('pre');
+      pre.className = 'plain';
+      pre.setAttribute('aria-label', 'terminal output');
+      host.appendChild(pre);
+      screen.plain = pre;
+      host.setAttribute('tabindex', '0');
+      // Named keys first: `Enter`.length is 5, so a printable-char test would
+      // silently drop the most important key on the keyboard.
+      const NAMED = {
+        Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b',
+        ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D',
+        Home: '\x1b[H', End: '\x1b[F', PageUp: '\x1b[5~', PageDown: '\x1b[6~',
+      };
+      const capture = (e) => {
+        let data = null;
+        if (NAMED[e.key]) data = NAMED[e.key];
+        else if (e.ctrlKey && e.key.length === 1) data = String.fromCharCode(e.key.toUpperCase().charCodeAt(0) - 64);
+        else if (e.key.length === 1) data = e.key;
+        if (data === null) return;
+        e.preventDefault();
+        send(data);
+      };
+      on(host, 'keydown', capture);
+    }
+    postResize();
+  }
+
+  function throttle(fn, wait) {
+    let timer = null;
+    return function () {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; fn(); }, wait || 120);
+    };
+  }
+
+  const postResize = throttle(() => {
+    if (!state.active) return;
+    api(`${API}/resize`, {
+      method: 'POST',
+      body: JSON.stringify({ session: state.active, cols: state.cols, rows: state.rows }),
+    }).catch(() => {});
+  }, 150);
+
+  function send(data) {
+    if (!state.active) return;
+    api(`${API}/input`, { method: 'POST', body: JSON.stringify({ session: state.active, data }) })
+      .catch(() => {});
+  }
+
+  // ---- sessions ------------------------------------------------------------
+
+  async function loadSessions() {
+    let status, body;
+    try {
+      ({ status, body } = await json(`${API}/sessions`));
+    } catch (err) {
+      setLink(false, 'offline');
+      return;
+    }
+    if (status === 401) { setLink(false, 'locked'); return; }
+    if (status !== 200) { setLink(false, `http ${status}`); return; }
+    setLink(true, 'live');
+    state.retry = 0;
+    state.sessions = (body && body.sessions) || [];
+    state.max = (body && body.max_sessions) || state.max;
+    renderTabs();
+    const live = state.sessions.filter((s) => !s.closed);
+    if (!state.active || !live.some((s) => s.id === state.active)) {
+      const preferred = live.find((s) => s.active) || live[0];
+      if (preferred) select(preferred.id);
+    } else {
+      const focused = live.find((s) => s.active);
+      if (focused && focused.id !== state.active) select(focused.id);
+    }
+  }
+
+  function renderTabs() {
+    const box = $('tabs');
+    if (!box) return;
+    box.textContent = '';
+    state.sessions.forEach((s) => {
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'tab' + (s.id === state.active ? ' active' : '') + (s.closed ? ' closed' : '');
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-selected', String(s.id === state.active));
+
+      const name = document.createElement('span');
+      name.textContent = s.label || s.id;
+      tab.appendChild(name);
+
+      const cwd = document.createElement('em');
+      cwd.textContent = s.cwd || '';
+      tab.appendChild(cwd);
+
+      const close = document.createElement('span');
+      close.className = 'x';
+      close.textContent = '×';
+      close.setAttribute('role', 'button');
+      close.setAttribute('aria-label', 'close ' + (s.label || s.id));
+      close.onclick = (e) => { e.stopPropagation(); closeSession(s.id); };
+      tab.appendChild(close);
+
+      tab.onclick = () => {
+        if (s.closed) { toast(`“${s.label || s.id}” already ended`, 'err'); return; }
+        api(`${API}/activate`, { method: 'POST', body: JSON.stringify({ session: s.id }) }).catch(() => {});
+        select(s.id);
+      };
+      tab.ondblclick = () => renameSession(s);
+      box.appendChild(tab);
+    });
+    const count = $('count');
+    if (count) count.textContent = `${state.sessions.length}/${state.max || 8}`;
+    // Disable rather than warn: a cap you cannot cross is clearer than a toast
+    // that repeats on every poll.
+    const newBtn = $('new');
+    if (newBtn) newBtn.disabled = state.sessions.length >= (state.max || 8);
+  }
+
+  function select(id) {
+    if (!id) return;
+    state.active = id;
+    state.offset = 0;
+    screen.clear();
+    renderTabs();
+    attach();
+    screen.focus();
+    const here = state.sessions.find((s) => s.id === id);
+    const hint = $('where');
+    if (hint) hint.textContent = here ? (here.cwd || '') : '';
+    renderEmptyState();
+  }
+
+  function renderEmptyState() {
+    const host = $('screen');
+    if (!host) return;
+    const has = state.sessions.some((s) => !s.closed);
+    let box = host.querySelector('.empty');
+    if (has) { if (box) box.remove(); return; }
+    if (box) return;
+    box = document.createElement('div');
+    box.className = 'empty';
+    box.innerHTML = '<div class="box"><h2>NO SHELL OPEN</h2>' +
+      '<p>Open a root shell to start working — it stays alive while you are away, and every agent command runs in one you can watch.</p>' +
+      '<button type="button" class="primary" id="emptyNew">+ open a shell</button></div>';
+    host.appendChild(box);
+    on($('emptyNew'), 'click', newSession);
+  }
+
+  function attach() {
+    if (state.stream && state.stream.close) state.stream.close();
+    state.stream = null;
+    if (!state.active) return;
+    const source = new EventSource(`${API}/stream?session=${encodeURIComponent(state.active)}&offset=${state.offset}`);
+    state.stream = source;
+    source.onmessage = (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch (err) { return; }
+      onChunk(data);
+    };
+    source.onerror = () => {
+      source.close();
+      if (!state.active) return;
+      // The host restarts shells and the network blips: back off instead of
+      // hammering a socket that is not there.
+      state.retry = Math.min((state.retry || 0) + 1, 6);
+      const wait = Math.min(1000 * Math.pow(1.6, state.retry), 12000);
+      setLink(null, 'reconnecting');
+      setTimeout(() => { if (state.active) attach(); }, wait);
+    };
+  }
+
+  function onChunk(data) {
+    if (data.o) {
+      state.offset += data.o.length;
+      screen.write(data.o);
+    }
+    if (data.error) { say('TERMINAL', data.error, 'err'); toast(data.error, 'err'); }
+    if (data.cwd) {
+      const hint = $('where');
+      if (hint) hint.textContent = data.cwd;
+      const here = state.sessions.find((s) => s.id === (data.session || state.active));
+      if (here) { here.cwd = data.cwd; renderTabs(); }
+    }
+    if (data.done) {
+      say('TERMINAL', `session ended (exit ${data.exit == null ? 0 : data.exit})`);
+      loadSessions();
+    }
+  }
+
+  async function newSession() {
+    const { body } = await json(`${API}/sessions`, {
+      method: 'POST',
+      body: JSON.stringify({ cols: state.cols, rows: state.rows }),
+    });
+    if (!body.session) { toast(body.error || 'could not open a session', 'err'); return; }
+    select(body.session);
+    await loadSessions();
+    toast(`shell ${body.session} open`, 'ok');
+  }
+
+  async function closeSession(id) {
+    const { body } = await json(`${API}/stop`, { method: 'POST', body: JSON.stringify({ session: id }) });
+    if (state.active === id) { state.active = null; state.offset = 0; screen.clear(); }
+    await loadSessions();
+    if (body && body.ok) toast('shell closed');
+  }
+
+  function renameSession(session) {
+    const label = global.prompt ? prompt('tab name', session.label || '') : null;
+    if (!label) return;
+    api(`${API}/rename`, {
+      method: 'POST',
+      body: JSON.stringify({ session: session.id, label }),
+    }).then(loadSessions).catch(() => {});
+  }
+
+  function renameActive() {
+    const s = state.sessions.find((x) => x.id === state.active && !x.closed);
+    if (s) renameSession(s); else toast('no focused shell', 'err');
+  }
+
+  // ---- health / latency ----------------------------------------------------
+
+  async function ping() {
+    const started = (global.performance && performance.now) ? performance.now() : Date.now();
+    try {
+      const res = await fetch('/health', { cache: 'no-store' });
+      if (!res.ok) throw new Error('http ' + res.status);
+      const body = await res.json().catch(() => ({}));
+      const ms = Math.round(((global.performance && performance.now) ? performance.now() : Date.now()) - started);
+      const el = $('latency');
+      if (el) el.textContent = ms + ' ms';
+      const hint = $('agentHint');
+      if (hint && body && body.agentbox) {
+        hint.textContent = body.agentbox.configured
+          ? 'Every command the agent runs appears in a shell tab you can watch.'
+          : 'No model provider configured yet — open ⚙ to add one (any OpenAI-compatible endpoint).';
+      }
+    } catch (err) {
+      const el = $('latency');
+      if (el) el.textContent = 'offline';
+      setLink(false, 'offline');
+    }
+  }
+
+  // ---- Agentbox ------------------------------------------------------------
+
+  async function loadProviders() {
+    const { status, body } = await json(`${AGENT}/providers`);
+    if (status === 401 || !body || !body.providers) return;
+    state.providers = body.providers;
+    state.provider = body.active || (state.providers[0] && state.providers[0].id) || '';
+
+    const pick = $('provider');
+    if (pick) {
+      pick.textContent = '';
+      state.providers.forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.label || p.id;
+        if (p.id === state.provider) opt.selected = true;
+        pick.appendChild(opt);
+      });
+      pick.hidden = state.providers.length < 2;
+    }
+    renderProviders(body);
+    const dot = $('adot');
+    if (dot) dot.classList.toggle('bad', !state.providers.length);
+    renderChips();
+  }
+
+  function renderProviders(body) {
+    const box = $('provList');
+    if (!box) return;
+    box.textContent = '';
+    (body.providers || []).forEach((p) => {
+      const row = document.createElement('div');
+      row.className = 'prov' + (p.id === state.provider ? ' active' : '');
+
+      const name = document.createElement('b');
+      name.textContent = p.id;
+      const url = document.createElement('span');
+      url.className = 'u';
+      url.textContent = `${p.base_url}${p.model ? ' · ' + p.model : ''}${p.has_key ? ' · ' + p.api_key : ''}`;
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.textContent = '×';
+      del.setAttribute('aria-label', 'remove ' + p.id);
+      del.onclick = async () => {
+        await api(`${AGENT}/providers/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+        loadProviders();
+      };
+      row.append(name, url, del);
+      box.appendChild(row);
+    });
+    const where = $('registry');
+    if (where) where.textContent = body.registry || '';
+  }
+
+  function renderChips() {
+    const box = $('chips');
+    if (!box) return;
+    box.textContent = '';
+    const suggestions = state.providers.length
+      ? ['what is running here?', 'install ffmpeg and check the version', 'show disk and memory usage', 'set up a python venv and install requests']
+      : ['add a provider to enable the agent'];
+    suggestions.forEach((text) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.textContent = text;
+      chip.onclick = () => {
+        if (!state.providers.length) { const p = $('providerBox'); if (p) { p.hidden = false; loadProviders(); } return; }
+        const input = $('input');
+        if (input) { input.value = text; input.focus(); }
+      };
+      box.appendChild(chip);
+    });
+  }
+
+  function stepCard(step) {
+    const details = document.createElement('details');
+    details.className = 'step';
+    details.setAttribute('data-tool', String(step.tool || ''));
+    const summary = document.createElement('summary');
+    const cmd = step.args && step.args.command;
+    summary.textContent = step.tool === 'run_command' && cmd ? `$ ${cmd}` : String(step.tool || 'step');
+    const pre = document.createElement('pre');
+    const result = step.result && step.result.output != null ? step.result.output : JSON.stringify(step.result);
+    pre.textContent = String(result == null ? '' : result).slice(0, 4000);
+    details.append(summary, pre);
+    return details;
+  }
+
+  async function ask(message) {
+    say('YOU', message, 'you');
+    const pending = say('AGENTBOX', 'thinking…', 'bot');
+    if (pending) pending.querySelector('.who').textContent = 'AGENTBOX · working';
+    const { status, body } = await json(`${AGENT}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ message, history: state.history, provider: state.provider || undefined }),
+    });
+    if (pending) pending.remove();
+    if (status !== 200 || !body.ok) {
+      const text = body.error || `HTTP ${status}`;
+      say('AGENTBOX', text, 'err');
+      toast(text, 'err');
+      return;
+    }
+    const box = $('log');
+    (body.steps || []).forEach((step) => {
+      if (box) { box.appendChild(stepCard(step)); box.scrollTop = box.scrollHeight; }
+    });
+    const reply = say('AGENTBOX', body.reply || '(no reply)', 'bot');
+    if (reply) {
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'copy';
+      copy.textContent = 'copy';
+      copy.onclick = () => {
+        const text = body.reply || '';
+        if (global.navigator && navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('reply copied', 'ok'));
+      };
+      reply.appendChild(copy);
+    }
+    state.history.push({ role: 'user', content: message }, { role: 'assistant', content: body.reply || '' });
+    loadSessions();   // its commands opened tabs — show them
+  }
+
+  async function saveProvider(form) {
+    const payload = {
+      id: $('p_id').value.trim(),
+      base_url: $('p_url').value.trim(),
+      model: $('p_model').value.trim(),
+      api_key: $('p_key').value,
+    };
+    const { status, body } = await json(`${AGENT}/providers`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) {
+      const text = body.error || `HTTP ${status}`;
+      say('AGENTBOX', text, 'err');
+      toast(text, 'err');
+      return;
+    }
+    $('p_key').value = '';
+    state.provider = body.provider.id;
+    loadProviders();
+    say('AGENTBOX', `provider ${body.provider.id} saved — using it for the next message`, 'bot');
+    toast(`provider ${body.provider.id} saved`, 'ok');
+  }
+
+  // ---- wiring --------------------------------------------------------------
+
+  function autosize(el) {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  }
+
+  function wire() {
+    on($('new'), 'click', newSession);
+    on($('rename'), 'click', renameActive);
+    on($('kill'), 'click', () => {
+      if (state.active) closeSession(state.active);
+      else toast('no focused shell', 'err');
+    });
+    on($('manage'), 'click', () => {
+      const box = $('providerBox');
+      box.hidden = !box.hidden;
+      if (!box.hidden) loadProviders();
+    });
+    on($('provider'), 'change', (e) => {
+      state.provider = e.target.value;
+      renderProviders({ providers: state.providers, registry: ($('registry') || {}).textContent });
+    });
+    on($('theme'), 'change', (e) => applyTheme(e.target.value));
+    on($('provForm'), 'submit', (e) => { e.preventDefault(); saveProvider(); });
+    on($('composer'), 'submit', (e) => {
+      e.preventDefault();
+      const box = $('input');
+      const message = box.value.trim();
+      if (!message) return;
+      box.value = '';
+      autosize(box);
+      ask(message);
+    });
+    on($('input'), 'input', (e) => autosize(e.target));
+    on($('input'), 'keydown', (e) => {
+      // Enter sends; Shift+Enter (and Ctrl/⌘+Enter) keep working.
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        $('composer').requestSubmit();
+      }
+    });
+    on($('clear'), 'click', () => screen.clear());
+    on($('paneToggle'), 'click', () => document.body.classList.toggle('agent-open'));
+    on($('closePane'), 'click', () => document.body.classList.remove('agent-open'));
+    on(global, 'resize', () => { screen.fit(); postResize(); });
+
+    // Shortcuts — Alt+… never collides with a shell running in the xterm.
+    on(global, 'keydown', (e) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey) return;
+      const key = e.key.toLowerCase();
+      if (key === 'k') { e.preventDefault(); screen.clear(); }
+      else if (key === 'r') { e.preventDefault(); renameActive(); }
+      else if (key === 'w') { e.preventDefault(); if (state.active) closeSession(state.active); }
+      else if (key === 't') { e.preventDefault(); newSession(); }
+      else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('agent-open'); }
+      else if (key === '1' || key === '2' || key === '3' || key === '4' || key === '5' || key === '6' || key === '7' || key === '8') {
+        const idx = Number(key) - 1;
+        const live = state.sessions.filter((s) => !s.closed);
+        if (live[idx]) { e.preventDefault(); select(live[idx].id); }
+      }
+    });
+  }
+
+  async function boot() {
+    rememberToken();
+    applyTheme(store.get('nova_terminal_theme', 'obsidian'));
+    wire();
+    buildTerminal();
+    setLink(null, 'linking');
+    try {
+      await loadSessions();
+      if (!state.sessions.some((s) => !s.closed)) await newSession();
+    } catch (err) {
+      setLink(false, 'offline');
+      say('TERMINAL', `cannot reach the terminal host (${err && err.message})`, 'err');
+    }
+    renderEmptyState();
+    loadProviders();
+    ping();
+    global.setInterval(loadSessions, 20000);
+    global.setInterval(ping, 45000);
+  }
+
+  const NovaTerminalConsole = {
+    state, screen, api, json, askToken, headers, toast, applyTheme, ping,
+    loadSessions, renderTabs, select, attach, onChunk,
+    newSession, closeSession, renameSession, renameActive, send, postResize, buildTerminal,
+    loadProviders, renderProviders, saveProvider, ask, boot, say,
+  };
+
+  global.NovaTerminalConsole = NovaTerminalConsole;
+  if (global.document && global.document.addEventListener) {
+    global.document.addEventListener('DOMContentLoaded', boot);
+  }
+})(typeof window !== 'undefined' ? window : globalThis);

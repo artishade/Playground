@@ -1,0 +1,5 @@
+# The terminal host needs a web server and an HTTP client — nothing else.
+# No SQLAlchemy, no Jinja2, no NovaRouter: `terminal/` is deployable alone.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27

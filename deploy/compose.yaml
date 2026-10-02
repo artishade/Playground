@@ -1,0 +1,38 @@
+# docker compose — the "I own a VPS" path.
+#
+#   cd terminal
+#   NOVA_TERMINAL_TOKEN=$(openssl rand -hex 24) docker compose up -d
+#
+# Pair it with Caddy/Traefik for TLS, or put it behind Cloudflare Tunnel if the
+# box has no public IP. A named volume keeps the workspace across `up --build`,
+# which is the one thing free PaaS tiers will not give you.
+services:
+  terminal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: novarouter-terminal:latest
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    environment:
+      # Required in practice: this container serves root shells.
+      NOVA_TERMINAL_TOKEN: ${NOVA_TERMINAL_TOKEN:?set NOVA_TERMINAL_TOKEN first}
+      NOVA_TERMINAL_HOST: 0.0.0.0
+      NOVA_TERMINAL_PORT: "3100"
+      NOVA_BUILD_ROOT: /data/build
+      # Any OpenAI-compatible /v1 endpoint. Unset → Agentbox stays off.
+      NOVA_AGENTBOX_BASE_URL: ${NOVA_AGENTBOX_BASE_URL:-}
+      NOVA_AGENTBOX_API_KEY: ${NOVA_AGENTBOX_API_KEY:-}
+      NOVA_AGENTBOX_MODEL: ${NOVA_AGENTBOX_MODEL:-}
+    volumes:
+      - nova_build:/data
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3100/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  nova_build:

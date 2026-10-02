@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en" data-theme="obsidian">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05060c">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="NovaRouter Terminal — a root cloud shell with an AI agent beside it.">
+<title>NovaRouter Terminal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0b14'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='%237c5cff' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h6' stroke='%2322d3ee' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<!-- xterm.js — the same versions the dashboard pins, so a standalone terminal
+     gets real emulation (colour, cursor, vim, top). If this CDN is blocked the
+     console falls back to a plain append-only viewer instead of rendering
+     nothing; see console.js. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<style>
+/* ==========================================================================
+   NovaRouter Terminal — the console skin.
+
+   One stylesheet, five themes, no build step. Everything below reads from the
+   token block, so a theme is six overrides and nothing else changes. The
+   palette is deliberately "web3 console": deep space background, aurora wash,
+   grid mask, gradient accents, glass panels — but the terminal itself stays a
+   terminal: monospace, no glow on text, no motion in the output.
+   ========================================================================== */
+:root {
+  --acc1: #7c5cff;                 /* violet — primary accent */
+  --acc2: #22d3ee;                 /* cyan   — secondary accent */
+  --acc3: #34d399;                 /* mint   — success / live */
+  --warn: #fbbf24;
+  --err:  #fb7185;
+
+  --bg:      #05060c;
+  --bg-2:    #080a14;
+  --panel:   rgba(255,255,255,.028);
+  --panel-2: rgba(255,255,255,.05);
+  --line:    rgba(255,255,255,.085);
+  --line-2:  rgba(255,255,255,.17);
+  --fg:      #e8ecf6;
+  --dim:     #8b93a9;
+  --dim-2:   #5f677c;
+
+  --grad: linear-gradient(120deg, var(--acc1), var(--acc2));
+  --glow: 0 0 0 1px color-mix(in srgb, var(--acc1) 45%, transparent),
+          0 10px 32px -14px color-mix(in srgb, var(--acc1) 75%, transparent);
+  --radius: 12px;
+  --radius-sm: 9px;
+  --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --term-bg: #05060c;
+  --term-fg: #cbd5e1;
+}
+html[data-theme="plasma"]  { --acc1:#ff3ea5; --acc2:#8b5cf6; --acc3:#f472b6; --bg:#0a0510; --bg-2:#120820; --term-bg:#0a0510; }
+html[data-theme="matrix"]  { --acc1:#3ee07f; --acc2:#a3e635; --acc3:#22d3ee; --bg:#040a07; --bg-2:#06130c; --term-bg:#040a07; }
+html[data-theme="glacier"] { --acc1:#38bdf8; --acc2:#818cf8; --acc3:#22d3ee; --bg:#040810; --bg-2:#071223; --term-bg:#040810; }
+html[data-theme="ember"]   { --acc1:#fb923c; --acc2:#f43f5e; --acc3:#fbbf24; --bg:#0c0705; --bg-2:#160c08; --term-bg:#0c0705; }
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg); overflow: hidden;
+  font: 14px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+/* aurora wash — decoration only, never intercepts a click */
+body::before {
+  content: ""; position: fixed; inset: -20% -10% auto -10%; height: 70vh; z-index: 0;
+  background:
+    radial-gradient(45% 60% at 12% 0%, color-mix(in srgb, var(--acc1) 26%, transparent), transparent 70%),
+    radial-gradient(40% 55% at 82% 6%, color-mix(in srgb, var(--acc2) 20%, transparent), transparent 70%);
+  filter: blur(30px); opacity: .5; pointer-events: none;
+}
+body::after {
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: .3;
+  background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+                    linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(70% 60% at 50% 0%, #000 0%, transparent 75%);
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 0%, #000 0%, transparent 75%);
+}
+#app { position: relative; z-index: 1; display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; }
+
+/* ---------------------------------------------------------------- topbar */
+.topbar {
+  display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
+  backdrop-filter: blur(14px) saturate(140%);
+}
+.brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.mark {
+  width: 27px; height: 27px; border-radius: 8px; flex: none; display: grid; place-items: center;
+  background: linear-gradient(140deg, color-mix(in srgb, var(--acc1) 30%, transparent), color-mix(in srgb, var(--acc2) 22%, transparent));
+  border: 1px solid var(--line-2); box-shadow: var(--glow);
+}
+.mark svg { width: 16px; height: 16px; }
+.brand b { font: 700 12px/1 var(--mono); letter-spacing: .14em; }
+.brand small { display: block; font: 500 9.5px/1.5 var(--mono); color: var(--dim-2); letter-spacing: .07em; }
+.grow { flex: 1; min-width: 0; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; flex: none;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+  font: 500 11px/1 var(--mono); color: var(--dim); white-space: nowrap;
+}
+.pill b { color: var(--fg); font-weight: 600; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc3); flex: none;
+       box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc3) 18%, transparent); }
+.dot.bad  { background: var(--err);  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 18%, transparent); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
+.dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+#where { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+         font: 11px var(--mono); color: var(--dim); }
+
+button, select {
+  background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 6px 11px; font: 500 12px var(--mono);
+  cursor: pointer; transition: border-color .16s, color .16s, background .16s, transform .16s;
+}
+button:hover, select:hover { border-color: color-mix(in srgb, var(--acc2) 55%, var(--line)); }
+button:active { transform: translateY(1px); }
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible,
+[tabindex]:focus-visible { outline: none; box-shadow: var(--glow); }
+button.primary {
+  background: var(--grad); color: #07070d; border: 0; font-weight: 700;
+  box-shadow: 0 6px 22px -10px color-mix(in srgb, var(--acc1) 85%, transparent);
+}
+button.primary:hover { filter: brightness(1.07); }
+button.ghost { background: transparent; }
+button.icon { padding: 6px 9px; }
+button[disabled] { opacity: .45; cursor: not-allowed; }
+select {
+  appearance: none; padding-right: 24px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+                    linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+  background-position: right 11px center, right 6px center;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+
+/* ------------------------------------------------------------- workspace */
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; min-height: 0; }
+section.pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+aside {
+  border-left: 1px solid var(--line); min-width: 0; min-height: 0;
+  display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--bg-2) 72%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.subbar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+#tabs { display: flex; gap: 7px; padding: 8px 12px; border-bottom: 1px solid var(--line);
+        overflow-x: auto; align-items: stretch; scrollbar-width: thin; }
+#tabs::-webkit-scrollbar { height: 6px; }
+#tabs::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
+.tab {
+  position: relative; display: flex; align-items: center; gap: 8px; padding: 5px 9px; flex: none;
+  border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--panel);
+  font: 12px var(--mono); max-width: 250px; color: var(--fg); cursor: pointer;
+  transition: border-color .16s, background .16s;
+}
+.tab:hover { border-color: var(--line-2); }
+.tab.active {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--acc1) 14%, var(--panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc1) 60%, transparent);
+}
+.tab.active::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px;
+  border-radius: 2px; background: var(--grad);
+}
+.tab em { font-style: normal; color: var(--dim-2); font-size: 11px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 12ch; }
+.tab .x { color: var(--dim-2); padding: 0 2px; border-radius: 4px; }
+.tab .x:hover { color: var(--err); }
+.tab.closed { opacity: .45; }
+
+#screen { flex: 1; min-height: 0; padding: 10px 8px 10px 14px; overflow: hidden; position: relative; }
+#screen .xterm { height: 100%; }
+#screen .xterm-viewport::-webkit-scrollbar { width: 8px; }
+#screen .xterm-viewport::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
+pre.plain {
+  margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font: 13px/1.5 var(--mono); color: var(--term-fg);
+}
+.screen-note { font: 11px var(--mono); color: var(--warn); padding: 2px 0 6px; }
+
+.empty { display: grid; place-items: center; height: 100%; text-align: center; color: var(--dim); }
+.empty .box { max-width: 46ch; padding: 0 16px; }
+.empty h2 { font: 600 13px/1.4 var(--mono); letter-spacing: .1em; color: var(--fg); margin: 0 0 8px; }
+.empty p { font-size: 12.5px; margin: 0 0 14px; }
+
+/* --------------------------------------------------------------- agent */
+#log { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px;
+       display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }
+#log::-webkit-scrollbar { width: 8px; }
+#log::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
+.msg {
+  position: relative; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+  font: 13px/1.55 var(--mono); background: var(--panel);
+}
+.msg.you { background: color-mix(in srgb, var(--acc2) 8%, var(--panel));
+           border-color: color-mix(in srgb, var(--acc2) 30%, var(--line)); }
+.msg.bot { background: color-mix(in srgb, var(--acc1) 8%, var(--panel));
+           border-color: color-mix(in srgb, var(--acc1) 26%, var(--line)); }
+.msg.err { border-color: color-mix(in srgb, var(--err) 60%, var(--line)); color: var(--err); }
+.who { font: 700 10px var(--mono); letter-spacing: .12em; color: var(--dim);
+       display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.who .tag { color: var(--acc3); }
+.msg .copy {
+  position: absolute; top: 7px; right: 8px; opacity: 0; transition: opacity .15s;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+  padding: 2px 7px; font: 10px var(--mono); color: var(--dim); cursor: pointer;
+}
+.msg:hover .copy, .msg:focus-within .copy { opacity: 1; }
+details.step { border: 1px dashed var(--line); border-radius: var(--radius-sm); padding: 6px 10px;
+               font: 12px var(--mono); color: var(--dim); background: transparent; }
+details.step summary { cursor: pointer; color: var(--acc3); outline: none; }
+details.step pre { margin: 8px 0 2px; white-space: pre-wrap; word-break: break-word; color: var(--dim); }
+details.step[data-tool="run_command"] summary { color: var(--acc2); }
+
+.chips { display: flex; gap: 6px; padding: 0 12px 10px; flex-wrap: wrap; }
+.chips:empty { display: none; }
+.chip {
+  border: 1px dashed var(--line-2); border-radius: 999px; padding: 4px 10px;
+  font: 11px var(--mono); color: var(--dim); background: transparent; cursor: pointer;
+}
+.chip:hover { color: var(--fg); border-color: var(--acc2); border-style: solid; }
+
+.providers { border-top: 1px solid var(--line); padding: 10px 12px; }
+.providers[hidden] { display: none; }
+.list { max-height: 148px; overflow: auto; display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
+.prov { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line);
+        border-radius: var(--radius-sm); padding: 5px 7px; font: 11px var(--mono); background: var(--panel); }
+.prov.active { border-color: color-mix(in srgb, var(--acc1) 60%, var(--line));
+               box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc1) 30%, transparent); }
+.prov .u { flex: 1; color: var(--dim-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov b { color: var(--fg); }
+
+form { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); }
+form.stack { flex-direction: column; gap: 7px; padding: 0; border: 0; }
+textarea, input, select {
+  background: color-mix(in srgb, var(--bg) 72%, #000); color: var(--fg);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; font: 12px var(--mono);
+}
+textarea { resize: none; min-height: 42px; max-height: 140px; }
+textarea::placeholder, input::placeholder { color: var(--dim-2); }
+.hint { font: 11px var(--mono); color: var(--dim-2); padding: 0 12px 8px; }
+kbd { font: 10px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px;
+      border-radius: 5px; padding: 1px 5px; color: var(--dim); background: var(--panel); }
+
+/* ---------------------------------------------------------------- toasts */
+#toasts { position: fixed; right: 14px; bottom: 14px; z-index: 40; display: flex;
+          flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
+.toast {
+  border: 1px solid var(--line-2); border-left: 2px solid var(--acc2); border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-2) 94%, transparent); backdrop-filter: blur(10px);
+  padding: 8px 12px; font: 11.5px var(--mono); color: var(--fg); max-width: 46ch;
+  animation: slide .22s ease-out;
+}
+.toast.err { border-left-color: var(--err); }
+.toast.ok  { border-left-color: var(--acc3); }
+@keyframes slide { from { opacity: 0; transform: translateY(6px) } }
+
+/* ------------------------------------------------------------ responsive */
+#paneToggle, #closePane { display: none; }
+@media (max-width: 1040px) { .main { grid-template-columns: minmax(0, 1fr) 360px; } }
+@media (max-width: 900px) {
+  .main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr); }
+  aside {
+    position: fixed; inset: 0; z-index: 30; border-left: 0;
+    background: color-mix(in srgb, var(--bg) 97%, transparent);
+    backdrop-filter: blur(18px); transform: translateX(100%);
+    transition: transform .24s cubic-bezier(.2,.7,.2,1);
+  }
+  body.agent-open aside { transform: none; }
+  #paneToggle, #closePane { display: inline-flex; }
+  .topbar { gap: 8px; padding: 8px 10px; }
+  .brand small { display: none; }
+  #where { max-width: 14ch; }
+}
+@media (max-width: 620px) { .hide-sm { display: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- ========================================================== topbar -->
+  <header class="topbar">
+    <span class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none">
+          <path d="M9 11l5 5-5 5" stroke="url(#bm)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M17 21h6" stroke="url(#bm)" stroke-width="3" stroke-linecap="round"/>
+          <defs>
+            <linearGradient id="bm" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="var(--acc1)"/>
+              <stop offset="1" stop-color="var(--acc2)"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </span>
+      <span>
+        <b>NOVAROUTER</b>
+        <small>ROOT@BUILD CLOUD SHELL</small>
+      </span>
+    </span>
+
+    <span class="pill" id="linkPill" title="connection to the terminal host">
+      <span class="dot pulse" id="dot"></span><span id="linkText">linking</span>
+    </span>
+    <span class="pill hide-sm" id="latencyPill" title="round-trip to /health">
+      <span id="latency">—</span>
+    </span>
+
+    <span class="grow"></span>
+
+    <span class="pill" title="open shells / cap">
+      <span id="count">0/8</span><span class="hide-sm">&nbsp;shells</span>
+    </span>
+    <select id="theme" aria-label="console theme" title="theme">
+      <option value="obsidian">obsidian</option>
+      <option value="plasma">plasma</option>
+      <option value="matrix">matrix</option>
+      <option value="glacier">glacier</option>
+      <option value="ember">ember</option>
+    </select>
+    <button id="new" type="button" class="primary">+ shell</button>
+    <button id="clear" type="button" class="icon" aria-label="clear the view" title="clear view (Alt+K)">clear</button>
+    <button id="paneToggle" type="button" class="icon" aria-label="toggle agent pane" title="agent pane">agent</button>
+  </header>
+
+  <!-- ======================================================= workspace -->
+  <div class="main">
+    <section class="pane">
+      <div class="subbar">
+        <span class="pill" title="working directory of the focused shell">
+          <span style="color:var(--acc2)">cwd</span>
+          <span id="where" aria-live="polite">—</span>
+        </span>
+        <span class="grow"></span>
+        <button id="rename" type="button" class="ghost hide-sm" title="rename the focused tab (Alt+R)">rename</button>
+        <button id="kill" type="button" class="ghost hide-sm" title="close the focused shell (Alt+W)">kill</button>
+      </div>
+      <div id="tabs" role="tablist" aria-label="terminal sessions"></div>
+      <div id="screen" aria-label="terminal output"></div>
+    </section>
+
+    <aside aria-label="Agentbox">
+      <div class="subbar">
+        <span class="pill">
+          <span class="dot" id="adot"></span><b>AGENTBOX</b>
+        </span>
+        <span class="grow"></span>
+        <select id="provider" aria-label="agent provider" style="max-width:150px"></select>
+        <button id="manage" type="button" class="icon" title="manage providers" aria-label="manage providers">⚙</button>
+        <button id="closePane" type="button" class="icon" title="close">×</button>
+      </div>
+      <div id="log" aria-live="polite" aria-label="agent conversation"></div>
+      <div class="chips" id="chips" aria-label="suggested prompts"></div>
+      <div class="providers" id="providerBox" hidden>
+        <div class="list" id="provList"></div>
+        <form id="provForm" class="stack">
+          <input id="p_id" placeholder="id — groq, openrouter, local-vllm" aria-label="provider id" required>
+          <input id="p_url" placeholder="base url — https://api.groq.com/openai/v1" aria-label="base url" required>
+          <input id="p_model" placeholder="model — optional" aria-label="model">
+          <input id="p_key" type="password" placeholder="api key — blank keeps the stored one" aria-label="api key">
+          <button type="submit" class="primary">save provider</button>
+          <span class="hint" id="registry"></span>
+        </form>
+      </div>
+      <div class="hint" id="agentHint">Every command the agent runs appears in a shell tab you can watch.</div>
+      <form id="composer">
+        <textarea id="input" rows="1" aria-label="message to the agent"
+          placeholder="deploy the site and tail the log…  (Ctrl/⌘+↵ to send)"></textarea>
+        <button type="submit" class="primary">send</button>
+      </form>
+    </aside>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<script src="/static/console.js"></script>
+<script>
+  // Served from the same host as the page; no build step, no bundler.
+</script>
+</body>
+</html>
