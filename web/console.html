@@ -255,6 +255,52 @@ textarea::placeholder, input::placeholder { color: var(--dim-2); }
 kbd { font: 10px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px;
       border-radius: 5px; padding: 1px 5px; color: var(--dim); background: var(--panel); }
 
+/* --------------------------------------------------------- live browser */
+.seg {
+  display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--panel);
+}
+.segbtn {
+  border: 0; border-radius: 0; background: transparent; color: var(--dim);
+  padding: 5px 12px; font: 500 11.5px var(--mono);
+}
+.segbtn:hover { color: var(--fg); background: var(--panel-2); }
+.segbtn.active {
+  color: var(--fg); background: color-mix(in srgb, var(--acc1) 18%, transparent);
+  box-shadow: inset 0 -2px 0 0 var(--acc1);
+}
+.segbtn .dot { margin-left: 2px; }
+
+#browserView {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0;
+  padding: 8px 12px 10px; overflow: hidden;
+}
+#browserView[hidden] { display: none; }
+.bbar { display: flex; align-items: center; gap: 7px; padding-bottom: 8px; }
+.bbar input {
+  flex: 1; min-width: 0; font: 12px var(--mono);
+  background: color-mix(in srgb, var(--bg) 72%, #000);
+}
+.bmeta { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; }
+.bmeta .tagx { max-width: 42ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.bstage {
+  flex: 1; min-height: 0; position: relative; border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; background: #0b0b0f;
+}
+.bempty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+.bempty .box { max-width: 46ch; padding: 0 16px; }
+.bempty h2 { font: 600 13px/1.4 var(--mono); letter-spacing: .1em; margin: 0 0 8px; color: var(--fg); }
+.bempty p { font-size: 12.5px; color: var(--dim); margin: 0 0 12px; }
+#bFrame {
+  display: block; width: 100%; height: 100%; object-fit: contain;
+  object-position: top center; cursor: crosshair; background: #0b0b0f;
+}
+#bFrame[hidden] { display: none; }
+.bfoot { display: flex; align-items: center; gap: 7px; padding-top: 8px; }
+.bfoot input { flex: 1; min-width: 0; font: 12px var(--mono); }
+.bfoot .hint { padding: 0; white-space: nowrap; }
+
 /* ------------------------------------------------------------ extensions */
 .drawer {
   position: fixed; inset: 0; z-index: 35; display: flex; flex-direction: column;
@@ -420,16 +466,58 @@ pre.out {
   <div class="main">
     <section class="pane">
       <div class="subbar">
-        <span class="pill" title="working directory of the focused shell">
+        <div class="seg" role="tablist" aria-label="left pane view">
+          <button type="button" class="segbtn active" data-view="shell" role="tab" aria-selected="true">shell</button>
+          <button type="button" class="segbtn" data-view="browser" role="tab" aria-selected="false">
+            browser <span class="dot" id="bDot" aria-hidden="true"></span>
+          </button>
+        </div>
+        <span class="grow"></span>
+        <span class="pill" title="working directory of the focused shell" id="cwdPill">
           <span style="color:var(--acc2)">cwd</span>
           <span id="where" aria-live="polite">—</span>
         </span>
-        <span class="grow"></span>
         <button id="rename" type="button" class="ghost hide-sm" title="rename the focused tab (Alt+R)">rename</button>
         <button id="kill" type="button" class="ghost hide-sm" title="close the focused shell (Alt+W)">kill</button>
       </div>
       <div id="tabs" role="tablist" aria-label="terminal sessions"></div>
       <div id="screen" aria-label="terminal output"></div>
+
+      <!-- ================================================= live browser -->
+      <div id="browserView" hidden>
+        <div class="bbar">
+          <button id="bBack" type="button" class="icon" title="back" aria-label="back">←</button>
+          <button id="bReload" type="button" class="icon" title="reload" aria-label="reload">⟳</button>
+          <input id="bUrl" placeholder="example.com — then Enter" aria-label="address" spellcheck="false">
+          <button id="bGo" type="button" class="primary">go</button>
+          <button id="bStart" type="button" class="icon" title="launch Chromium" aria-label="start browser">⏻</button>
+          <button id="bStop" type="button" class="icon" title="close the browser" aria-label="stop browser">■</button>
+        </div>
+        <div class="bmeta">
+          <span class="tagx" id="bStatus">idle</span>
+          <span class="grow"></span>
+          <span class="tagx hide-sm" id="bTitle"></span>
+          <span class="tagx" id="bFps"></span>
+        </div>
+        <div class="bstage" id="bStage">
+          <div class="bempty" id="bEmpty">
+            <div class="box">
+              <h2>NO BROWSER YET</h2>
+              <p>A real Chromium the agent drives and you watch. Press <b>⏻</b>, or just
+                ask the agent to open something — it lands here.</p>
+              <button type="button" class="primary" id="bLaunch">launch browser</button>
+              <p class="hint" id="bHint"></p>
+            </div>
+          </div>
+          <img id="bFrame" alt="live browser view" tabindex="0" hidden>
+        </div>
+        <div class="bfoot">
+          <input id="bType" placeholder="type into the page, Enter to submit" aria-label="type into page">
+          <button id="bUp" type="button" class="icon" title="scroll up" aria-label="scroll up">↑</button>
+          <button id="bDown" type="button" class="icon" title="scroll down" aria-label="scroll down">↓</button>
+          <span class="hint hide-sm">click the page to click there · wheel to scroll</span>
+        </div>
+      </div>
     </section>
 
     <aside aria-label="Agentbox">

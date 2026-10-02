@@ -29,8 +29,10 @@ NovaRouter gateway pointing at it.
 | `skills.py` | Uploadable `SKILL.md` / `.zip` bundles, with progressive disclosure into the prompt |
 | `plugins.py` | Declarative HTTP tools (safe default) and opt-in local Python plugins |
 | `store.py` | Pluggable persistence: `file` (default) · `supabase` · `postgres` (Neon/Railway/…) |
-| `web/console.html` | **The console page** — shell tabs on one side, the agent on the other. Served at `/` |
-| `web/console.js` | Its client: session tabs, SSE stream, xterm.js (with a plain-viewer fallback), chat, providers, themes, shortcuts, extensions drawer |
+| `browser.py` | The live Chromium session the user and the agent share (optional dependency) |
+| `browser_api.py` | Its HTTP surface: SSE frame stream, navigation and actions |
+| `web/console.html` | **The console page** — shell tabs and a live browser on one side, the agent on the other. Served at `/` |
+| `web/console.js` | Its client: session tabs, SSE stream, xterm.js (with a plain-viewer fallback), the browser pane, chat, providers, themes, shortcuts, extensions drawer |
 | `service.py` | The standalone host: `python3 -m terminal.service` |
 | `config.py` | Every `NOVA_TERMINAL_*` / `NOVA_AGENTBOX_*` knob |
 | `Dockerfile` | Builds this directory **alone** — no gateway, no database, no UI |
@@ -320,3 +322,73 @@ POST   /agent/extensions/db/query        one statement (postgres backends)
 Nothing in this surface ever echoes a secret: API keys, tokens and auth headers
 come back masked, and a plugin's code is returned only on a host that already
 allows it to run.
+
+## The live browser — one Chromium, two drivers
+
+The agent's browser tools act on a **real Chromium page the user is watching**,
+in the same console pane. That sharing is the whole point: an agent browsing in
+a private headless session is a black box, whereas here you can watch it work,
+take over mid-task, or fix the one field it got wrong.
+
+Install it on a host that wants it (it is not in the base requirements):
+
+```bash
+pip install playwright && python3 -m playwright install --with-deps chromium
+```
+
+Without it, every browser route answers `browser_unavailable` with the install
+command, `/health` reports `browser.playwright: false`, and nothing else in the
+terminal changes. That is deliberate: a browser is ~400 MB of Chromium that many
+free hosts cannot carry, and the terminal's promise is that `terminal/` runs
+anywhere with three Python packages.
+
+### The user's side
+
+Switch the left pane to **browser** (or `Alt+B`). You get an address bar, back,
+reload, launch/stop, scroll buttons, a type-into-page box, and the live view —
+click the page to click there, wheel to scroll. Frames arrive over SSE as base64
+JPEG, roughly one every 700 ms, and **only when the page actually changed**, so
+an idle page costs nothing.
+
+### The agent's side
+
+Eight tools, all acting on that same page:
+
+| Tool | What it does |
+| --- | --- |
+| `browser_open` | Navigate (a real page load, not a fetch) |
+| `browser_read` | Title, URL, visible text, **and the interactive elements** with their text/name/id |
+| `browser_click` | By CSS selector, by visible text, or by viewport coordinates |
+| `browser_type` | Into a field or into focus, optionally pressing Enter |
+| `browser_scroll` | By pixels, or to the top/bottom |
+| `browser_eval` | Run JS and get JSON back — the scraping escape hatch |
+| `browser_screenshot` | Save the frame into the workspace and return the path |
+
+`browser_read` returning the element list is the detail that makes the agent
+useful rather than lucky: it can see that a button says *Sign in* and click it
+by text, instead of guessing a selector that does not exist.
+
+### Routes
+
+```
+GET  /agent/browser                 state: running, url, title, viewport, counters
+POST /agent/browser/start|stop|resize
+POST /agent/browser/navigate        {url, wait}
+POST /agent/browser/action          {action: click|type|press|scroll|back|goto}
+GET  /agent/browser/frame           one JPEG (image/jpeg, or 204 when busy)
+GET  /agent/browser/stream          SSE: `frame` (base64 jpeg), `state`, `error`
+```
+
+Two design notes worth knowing:
+
+- **One lock, one page.** Every action serialises on a single asyncio lock, so a
+  user's click and the agent's keystroke can never interleave halfway. A frame
+  request that arrives mid-action returns `204` rather than queueing — the client
+  keeps the last frame, which is better than a laggy live view.
+- **The frame stream takes the token in the query string.** `EventSource` cannot
+  send a header, and an `<img>` cannot either. It is a read-only stream of a page
+  the holder of that token can already drive, and it is the usual trade for a live
+  view. Every other browser route uses the normal header.
+
+The browser is closed after 30 minutes of no activity (the health poll is the
+clock), and on shutdown — a forgotten Chromium is 400 MB of resident memory.

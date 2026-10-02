@@ -622,7 +622,208 @@
     toast(`provider ${body.provider.id} saved`, 'ok');
   }
 
-  // ---- extensions: MCP servers, skills, plugins, database ------------------
+  // ---- live browser --------------------------------------------------------
+
+  const BROWSER = '/agent/browser';
+
+  const browser = {
+    stream: null,
+    running: false,
+    available: true,
+    url: '',
+    title: '',
+    viewport: { width: 1280, height: 800 },
+    frames: 0,
+    lastFrameAt: 0,
+    fps: 0,
+    view: 'shell',
+  };
+
+  function showView(name) {
+    browser.view = name === 'browser' ? 'browser' : 'shell';
+    const shellish = ['screen', 'tabs'];
+    shellish.forEach((id) => { const el = $(id); if (el) el.hidden = browser.view === 'browser'; });
+    const cwdPill = $('cwdPill');
+    if (cwdPill) cwdPill.hidden = browser.view === 'browser';
+    const bv = $('browserView');
+    if (bv) bv.hidden = browser.view !== 'browser';
+    document.querySelectorAll('.segbtn').forEach((btn) => {
+      const active = btn.dataset.view === browser.view;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', String(active));
+    });
+    if (browser.view === 'browser') {
+      screen.fit();                 // the xterm was hidden; re-fit on the way back
+      ensureBrowserStream();
+    } else {
+      screen.focus();
+      postResize();
+    }
+  }
+
+  function setBrowserStatus(text, cls) {
+    const el = $('bStatus');
+    if (el) { el.textContent = text; el.className = 'tagx' + (cls ? ' ' + cls : ''); }
+    const dot = $('bDot');
+    if (dot) dot.classList.toggle('bad', !browser.running);
+  }
+
+  async function browserState() {
+    const { status, body } = await json(BROWSER);
+    if (status !== 200) { toast(body.error || 'browser unavailable', 'err'); return null; }
+    const info = body.browser || {};
+    browser.running = !!info.running;
+    browser.available = info.available !== false;
+    browser.viewport = info.viewport || browser.viewport;
+    browser.url = info.url || '';
+    browser.title = info.title || '';
+    const urlBox = $('bUrl');
+    if (urlBox && document.activeElement !== urlBox) urlBox.value = browser.url || '';
+    const titleEl = $('bTitle');
+    if (titleEl) titleEl.textContent = browser.title || '';
+    setBrowserStatus(browser.running ? 'live' : (browser.available ? 'idle' : 'unavailable'),
+      browser.running ? 'acc' : '');
+    const frame = $('bFrame');
+    const empty = $('bEmpty');
+    if (frame) frame.hidden = !browser.running;
+    if (empty) empty.hidden = browser.running;
+    const hint = $('bHint');
+    if (hint && !browser.available) {
+      hint.textContent = 'Playwright is not installed on this host — see /health or the README.';
+    }
+    return info;
+  }
+
+  async function browserStart() {
+    setBrowserStatus('launching…');
+    const { status, body } = await json(`${BROWSER}/start`, { method: 'POST' });
+    if (status !== 200) {
+      toast(body.error || 'could not launch the browser', 'err');
+      setBrowserStatus(body.code === 'browser_unavailable' ? 'unavailable' : 'failed');
+      return;
+    }
+    toast('browser launched', 'ok');
+    await browserState();
+    ensureBrowserStream();
+  }
+
+  async function browserStop() {
+    await json(`${BROWSER}/stop`, { method: 'POST' });
+    if (browser.stream) { browser.stream.close(); browser.stream = null; }
+    await browserState();
+    setBrowserStatus('idle');
+    toast('browser closed');
+  }
+
+  async function browserGo(url) {
+    const target = (url || ($('bUrl') && $('bUrl').value) || '').trim();
+    if (!target) return;
+    if (!browser.running) await browserStart();
+    setBrowserStatus('loading…');
+    const { status, body } = await json(`${BROWSER}/navigate`, {
+      method: 'POST', body: JSON.stringify({ url: target }),
+    });
+    if (status !== 200) { toast(body.error || 'navigation failed', 'err'); setBrowserStatus('error'); return; }
+    browser.url = body.browser.url || target;
+    if ($('bUrl')) $('bUrl').value = browser.url;
+    ensureBrowserStream();
+  }
+
+  async function browserAction(payload) {
+    if (!browser.running) return;
+    const { status, body } = await json(`${BROWSER}/action`, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    if (status !== 200) { toast(body.error || 'action failed', 'err'); return; }
+    const info = body.browser || {};
+    browser.url = info.url || browser.url;
+    const titleEl = $('bTitle');
+    if (titleEl && info.title) titleEl.textContent = info.title;
+  }
+
+  /**
+   * The frame stream. Frames arrive as base64 JPEG on an SSE `frame` event, so
+   * a page the user is not looking at costs nothing but the connection.
+   */
+  function ensureBrowserStream() {
+    if (browser.stream || browser.view !== 'browser') return;
+    const token = state.token ? `&token=${encodeURIComponent(state.token)}` : '';
+    // EventSource cannot send a header, so this one route takes the token in the
+    // query string. It is a read-only stream of a page the holder can already drive.
+    const source = new EventSource(`${BROWSER}/stream?force=1${token}`);
+    browser.stream = source;
+    source.addEventListener('hello', () => setBrowserStatus(browser.running ? 'live' : 'idle', browser.running ? 'acc' : ''));
+    source.addEventListener('frame', (e) => {
+      let payload;
+      try { payload = JSON.parse(e.data); } catch (err) { return; }
+      const frame = $('bFrame');
+      if (!frame || !payload.jpeg) return;
+      frame.src = `data:image/jpeg;base64,${payload.jpeg}`;
+      frame.hidden = false;
+      const empty = $('bEmpty');
+      if (empty) empty.hidden = true;
+      browser.frames += 1;
+      const now = Date.now();
+      if (browser.lastFrameAt && now - browser.lastFrameAt < 4000) {
+        browser.fps = Math.round(1000 / (now - browser.lastFrameAt) * 10) / 10;
+      }
+      browser.lastFrameAt = now;
+      const fps = $('bFps');
+      if (fps) fps.textContent = `${browser.frames} frames`;
+    });
+    source.addEventListener('state', (e) => {
+      let info;
+      try { info = JSON.parse(e.data); } catch (err) { return; }
+      browser.running = !!info.running;
+      browser.url = info.url || browser.url;
+      browser.title = info.title || browser.title;
+      const urlBox = $('bUrl');
+      if (urlBox && document.activeElement !== urlBox && info.url) urlBox.value = info.url;
+      const titleEl = $('bTitle');
+      if (titleEl) titleEl.textContent = info.title || '';
+      setBrowserStatus(info.running ? 'live' : 'idle', info.running ? 'acc' : '');
+      const frame = $('bFrame');
+      if (frame) frame.hidden = !info.running;
+      const empty = $('bEmpty');
+      if (empty) empty.hidden = !!info.running;
+    });
+    source.addEventListener('error', (e) => {
+      try {
+        const payload = JSON.parse(e.data || '{}');
+        if (payload.error) toast(payload.error, 'err');
+      } catch (err) { /* the connection itself dropped; handled below */ }
+    });
+    source.onerror = () => {
+      source.close();
+      browser.stream = null;
+      if (browser.view === 'browser') setTimeout(ensureBrowserStream, 2500);
+    };
+  }
+
+  /** A click on the frame, mapped from the displayed image to the viewport. */
+  async function frameClick(event) {
+    const frame = $('bFrame');
+    if (!frame || !browser.running) return;
+    const rect = frame.getBoundingClientRect();
+    const natural = { width: browser.viewport.width, height: browser.viewport.height };
+    // object-fit: contain letterboxes the image; undo that before scaling.
+    const scale = Math.min(rect.width / natural.width, rect.height / natural.height);
+    const drawnW = natural.width * scale;
+    const drawnH = natural.height * scale;
+    const offsetX = (rect.width - drawnW) / 2;
+    const offsetY = (rect.height - drawnH) / 2;
+    const x = (event.clientX - rect.left - offsetX) / scale;
+    const y = (event.clientY - rect.top - offsetY) / scale;
+    if (x < 0 || y < 0 || x > natural.width || y > natural.height) return;
+    await browserAction({ action: 'click', x: Math.round(x), y: Math.round(y) });
+  }
+
+  function browserWheel(event) {
+    if (!browser.running) return;
+    event.preventDefault();
+    browserAction({ action: 'scroll', direction: event.deltaY < 0 ? 'up' : 'down',
+                    amount: Math.min(1200, Math.abs(Math.round(event.deltaY)) || 400) });
+  }
 
   const EXT = '/agent/extensions';
 
@@ -1139,6 +1340,31 @@
     on($('closePane'), 'click', () => document.body.classList.remove('agent-open'));
     on(global, 'resize', () => { screen.fit(); postResize(); });
 
+    // ---- live browser controls --------------------------------------------
+    document.querySelectorAll('.segbtn').forEach((btn) => {
+      on(btn, 'click', () => showView(btn.dataset.view));
+    });
+    on($('bGo'), 'click', () => browserGo());
+    on($('bUrl'), 'keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); browserGo(); } });
+    on($('bStart'), 'click', browserStart);
+    on($('bLaunch'), 'click', browserStart);
+    on($('bStop'), 'click', browserStop);
+    on($('bBack'), 'click', () => browserAction({ action: 'back' }));
+    on($('bReload'), 'click', () => browserGo(browser.url || ($('bUrl') && $('bUrl').value)));
+    on($('bUp'), 'click', () => browserAction({ action: 'scroll', direction: 'up', amount: 700 }));
+    on($('bDown'), 'click', () => browserAction({ action: 'scroll', direction: 'down', amount: 700 }));
+    on($('bFrame'), 'click', frameClick);
+    on($('bFrame'), 'wheel', browserWheel, { passive: false });
+    on($('bType'), 'keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const box = $('bType');
+      const text = box.value;
+      if (!text) return;
+      box.value = '';
+      browserAction({ action: 'type', text, submit: true });
+    });
+
     // ---- extensions drawer ------------------------------------------------
     on($('ext'), 'click', () => {
       const panel = $('extPanel');
@@ -1180,6 +1406,7 @@
       else if (key === 'r') { e.preventDefault(); renameActive(); }
       else if (key === 'w') { e.preventDefault(); if (state.active) closeSession(state.active); }
       else if (key === 't') { e.preventDefault(); newSession(); }
+      else if (key === 'b') { e.preventDefault(); showView(browser.view === 'browser' ? 'shell' : 'browser'); }
       else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('agent-open'); }
       else if (key === '1' || key === '2' || key === '3' || key === '4' || key === '5' || key === '6' || key === '7' || key === '8') {
         const idx = Number(key) - 1;
@@ -1216,6 +1443,7 @@
     loadProviders, renderProviders, saveProvider, ask, boot, say,
     ext, loadExtensions, loadMcp, loadSkills, loadPlugins, loadDb, loadCatalogue,
     showPane, uploadSkillFile, runDbQuery,
+    browser, showView, browserState, browserStart, browserStop, browserGo, browserAction,
   };
 
   global.NovaTerminalConsole = NovaTerminalConsole;

@@ -171,6 +171,96 @@ TOOLS: list[dict[str, Any]] = [
             }, ["sql"]),
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_open",
+            "description": ("Open a URL in the shared live browser the user is watching. "
+                            "This is a real Chromium page, not a fetch: the user sees every "
+                            "step you take and can take over. Returns the page title, the "
+                            "final URL and the visible text."),
+            "parameters": _schema({
+                "url": {"type": "string", "description": "Address to open — `example.com` works."},
+                "wait": {"type": "string", "enum": ["domcontentloaded", "load", "networkidle"],
+                         "description": "How long to wait before reading the page."},
+            }, ["url"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_read",
+            "description": ("Read the current page: title, URL and its visible text. "
+                            "Call this after opening or clicking to see what changed."),
+            "parameters": _schema({
+                "max_chars": {"type": "integer", "description": "Truncate the text (default 6000)."},
+            }, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": ("Click something on the page — by CSS selector, by its visible text, "
+                            "or by viewport coordinates. Prefer visible text when you can see it "
+                            "in browser_read."),
+            "parameters": _schema({
+                "selector": {"type": "string", "description": "CSS selector, e.g. 'button[type=submit]'."},
+                "text": {"type": "string", "description": "Visible link or button text to click."},
+                "x": {"type": "integer", "description": "Viewport x, with y, to click a coordinate."},
+                "y": {"type": "integer", "description": "Viewport y, with x."},
+            }, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_type",
+            "description": "Type text into a field (or into whatever has focus), optionally pressing Enter.",
+            "parameters": _schema({
+                "text": {"type": "string", "description": "What to type."},
+                "selector": {"type": "string", "description": "Field selector; omit to type into focus."},
+                "submit": {"type": "boolean", "description": "Press Enter afterwards."},
+            }, ["text"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_scroll",
+            "description": "Scroll the page, or jump to the bottom, to reach content below the fold.",
+            "parameters": _schema({
+                "direction": {"type": "string", "enum": ["down", "up", "top", "bottom"]},
+                "amount": {"type": "integer", "description": "Pixels (default 600)."},
+            }, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_eval",
+            "description": ("Run JavaScript in the page and get the result. The escape hatch for "
+                            "scraping: query the DOM and return exactly the data you need. "
+                            "Keep it a single expression returning JSON-able data."),
+            "parameters": _schema({
+                "script": {"type": "string",
+                           "description": "An expression or function body, e.g. "
+                                          "`[...document.querySelectorAll('h2')].map(h => h.innerText)`"},
+            }, ["script"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": ("Capture the current viewport. The frame is saved into the workspace "
+                            "as a JPEG and the path is returned, so you can inspect it with the "
+                            "shell or hand it to the user."),
+            "parameters": _schema({
+                "path": {"type": "string", "description": "Where to save it (default: a timestamped file)."},
+            }, []),
+        },
+    },
 ]
 
 
@@ -274,7 +364,158 @@ async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
             return {"error": str(err), "code": err.code}
         return {"rows": rows[:200], "count": len(rows)}
 
+    if name.startswith("browser_"):
+        return await _browser_tool(name, args)
+
     return {"error": f"unknown tool: {name}"}
+
+
+# --------------------------------------------------------------------------- #
+# Browser tools — the agent drives the same page the user is watching
+# --------------------------------------------------------------------------- #
+
+
+async def _page_summary(max_chars: int = 6000) -> dict[str, Any]:
+    """What the agent needs to decide its next move: where it is and what is here."""
+    from .browser import SESSION
+
+    if not SESSION.alive:
+        return {"running": False,
+                "hint": "the browser is not open — call browser_open with a url first"}
+    state = await SESSION.state()
+    summary: dict[str, Any] = {
+        "running": True,
+        "url": state["url"],
+        "title": state["title"],
+        "viewport": state["viewport"],
+    }
+    try:
+        text = await SESSION.page.inner_text("body")
+    except Exception:
+        text = ""
+    if text:
+        limit = max(500, min(40000, int(max_chars or 6000)))
+        summary["text"] = text[:limit]
+        summary["truncated"] = len(text) > limit
+    # Interactive elements, so the model can pick a selector without guessing.
+    try:
+        elements = await SESSION.page.evaluate(
+            "() => [...document.querySelectorAll('a,button,input,textarea,select')]"
+            ".slice(0, 60).map(el => ({tag: el.tagName.toLowerCase(),"
+            " text: (el.innerText || el.value || el.placeholder || '').trim().slice(0, 80),"
+            " name: el.getAttribute('name') || '', id: el.id || '',"
+            " type: el.getAttribute('type') || ''}))"
+            ".filter(el => el.text || el.name || el.id)"
+        )
+        if elements:
+            summary["elements"] = elements
+    except Exception:
+        pass
+    return summary
+
+
+async def _browser_tool(name: str, args: dict[str, Any]) -> Any:
+    """Route one browser_* tool onto the shared session."""
+    from .browser import BrowserError, BrowserUnavailable, SESSION
+
+    try:
+        if name == "browser_open":
+            url = str(args.get("url") or "").strip()
+            if not url:
+                return {"error": "url is required"}
+            wait = str(args.get("wait") or "domcontentloaded")
+            if wait not in ("load", "domcontentloaded", "networkidle"):
+                wait = "domcontentloaded"
+            state = await SESSION.navigate(url, wait)
+            return {"ok": True, "url": state["url"], "title": state["title"],
+                    "status_code": state.get("status_code"),
+                    "note": "the user can see this page and take over at any time"}
+
+        if name == "browser_read":
+            return await _page_summary(int(args.get("max_chars") or 6000))
+
+        if name == "browser_click":
+            x, y = args.get("x"), args.get("y")
+            state = await SESSION.click(
+                str(args.get("selector") or ""),
+                int(x) if x is not None else None,
+                int(y) if y is not None else None,
+                str(args.get("text") or ""),
+            )
+            summary = await _page_summary(4000)
+            summary["clicked"] = state.get("clicked")
+            return summary
+
+        if name == "browser_type":
+            text = args.get("text")
+            if not isinstance(text, str):
+                return {"error": "text must be a string"}
+            await SESSION.type_text(
+                text,
+                str(args.get("selector") or ""),
+                bool(args.get("submit")),
+                True,
+            )
+            return await _page_summary(4000)
+
+        if name == "browser_scroll":
+            await SESSION.scroll(str(args.get("direction") or "down"),
+                                 int(args.get("amount") or 600))
+            summary = await _page_summary(4000)
+            try:
+                summary["scroll_y"] = await SESSION.page.evaluate("() => window.scrollY")
+            except Exception:
+                pass
+            return summary
+
+        if name == "browser_eval":
+            script = str(args.get("script") or "").strip()
+            if not script:
+                return {"error": "script is required"}
+            if not SESSION.alive:
+                return {"error": "the browser is not open — call browser_open first"}
+            try:
+                result = await SESSION.page.evaluate(script)
+            except Exception as err:
+                return {"error": f"the script failed: {err.__class__.__name__}: {err}"}
+            return {"result": _jsonable(result)}
+
+        if name == "browser_screenshot":
+            import time as _time
+
+            from .config import build_root
+
+            raw = await SESSION.frame(70)
+            if not raw:
+                return {"error": "the page is busy; try again in a moment"}
+            target = str(args.get("path") or "").strip()
+            if not target:
+                target = str(build_root() / f"screenshot-{int(_time.time())}.jpg")
+            elif not target.startswith("/"):
+                target = str(build_root() / target)
+            try:
+                with open(target, "wb") as fh:
+                    fh.write(raw)
+            except OSError as err:
+                return {"error": f"cannot write {target}: {err}"}
+            return {"ok": True, "path": target, "bytes": len(raw)}
+    except BrowserUnavailable as err:
+        return {"error": str(err), "code": err.code}
+    except BrowserError as err:
+        return {"error": str(err), "code": err.code}
+
+    return {"error": f"unknown browser tool: {name}"}
+
+
+def _jsonable(value: Any) -> Any:
+    """Playwright returns JS values; keep the result safe to json.dumps."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value[:200]]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in list(value.items())[:200]}
+    return str(value)[:2000]
 
 
 # --------------------------------------------------------------------------- #
@@ -522,6 +763,20 @@ async def _system_prompt() -> str:
             f"A {info['backend']} database is connected. Use the `sql` tool for real "
             "queries instead of guessing at data through the shell."
         )
+    try:
+        from .browser_api import _available
+
+        if _available():
+            parts.append(
+                "A live Chromium browser is available and the user is watching it. "
+                "Use browser_open / browser_read / browser_click / browser_type / "
+                "browser_scroll / browser_eval for anything on the web — they act on a "
+                "real page you can see, and the user can take over at any moment. "
+                "Prefer browser_read over curl when you need to see what a page shows, "
+                "and browser_eval to extract structured data from the DOM."
+            )
+    except Exception:                             # noqa: BLE001
+        pass
     return "\n\n".join(parts)
 
 

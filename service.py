@@ -29,6 +29,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -46,6 +47,7 @@ from terminal.config import (
     build_root,
 )
 from terminal.extensions import router as extensions_router
+from terminal.browser_api import router as browser_router
 from terminal.store import describe as store_describe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -71,6 +73,12 @@ async def lifespan(_app: FastAPI):
         await terminal_link.current().close_all()
     except Exception as err:
         log.warning("shell teardown reported: %s", err)
+    try:
+        from terminal.browser import SESSION
+
+        await SESSION.stop()
+    except Exception as err:                      # noqa: BLE001 — shutdown is best-effort
+        log.warning("browser teardown reported: %s", err)
 
 
 app = FastAPI(
@@ -91,6 +99,24 @@ TOKEN_HEADERS = ("x-nova-terminal-token", "authorization")
 # every API call it makes, so opening it leaks nothing.
 OPEN_PATHS = ("/health", "/api/health", "/", "/index.html", "/console",
               "/agent", "/agent/", "/static/console.js")
+
+
+def _browser_report() -> dict[str, Any]:
+    """Browser availability for /health — never launches it as a side effect."""
+    try:
+        import importlib.util
+
+        installed = importlib.util.find_spec("playwright") is not None
+    except Exception:                             # noqa: BLE001
+        installed = False
+    from terminal.browser import SESSION
+
+    running = False
+    try:
+        running = SESSION.alive
+    except Exception:                             # noqa: BLE001
+        pass
+    return {"playwright": installed, "running": running, "enabled": installed}
 
 
 @app.middleware("http")
@@ -126,6 +152,11 @@ app.include_router(agentbox_router, prefix="/agent", tags=["agent"])
 # under /agent so the agent owns everything it can use, and so the console has
 # one prefix to talk to.
 app.include_router(extensions_router, prefix="/agent/extensions", tags=["extensions"])
+
+# The live browser — the frame stream and the controls the user drives. Mounted
+# under /agent because the agent drives the *same* routes; a browser the agent
+# cannot see is a black box, and one the user cannot see is worse.
+app.include_router(browser_router, prefix="/agent/browser", tags=["browser"])
 
 
 # --------------------------------------------------------------------------- #
@@ -165,6 +196,14 @@ async def health():
         ok = True
     except Exception:
         state, sessions, ok = {}, 0, False
+    # A forgotten browser is 400 MB of Chromium; the health poll is the only
+    # clock this service has, so the reaper rides it.
+    try:
+        from terminal.browser import SESSION
+
+        await SESSION.reap_if_idle()
+    except Exception:                             # noqa: BLE001
+        pass
     return JSONResponse({
         "ok": ok,
         "status": "healthy" if ok else "degraded",
@@ -180,6 +219,7 @@ async def health():
         "auth_required": bool(TERMINAL_SERVICE_TOKEN),
         "agentbox": agentbox_status(),
         "store": store_describe(),
+        "browser": _browser_report(),
     })
 
 
