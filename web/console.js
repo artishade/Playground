@@ -622,7 +622,476 @@
     toast(`provider ${body.provider.id} saved`, 'ok');
   }
 
-  // ---- wiring --------------------------------------------------------------
+  // ---- extensions: MCP servers, skills, plugins, database ------------------
+
+  const EXT = '/agent/extensions';
+
+  const ext = {
+    loaded: false,
+    mcp: [],
+    skills: [],
+    plugins: [],
+    store: null,
+    catalogue: null,
+    codeAllowed: false,
+  };
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function btn(label, fn, cls) {
+    const node = el('button', cls || '', label);
+    node.type = 'button';
+    node.onclick = fn;
+    return node;
+  }
+
+  function itemCard(name, enabled, meta, tags, acts) {
+    const card = el('div', 'item ' + (enabled ? 'on' : 'off'));
+    const top = el('div', 'top');
+    top.append(el('b', '', name));
+    top.append(el('span', 'grow'));
+    if (tags) top.append(...tags);
+    card.append(top);
+    if (meta) card.append(el('div', 'meta', meta));
+    if (acts && acts.length) {
+      const row = el('div', 'acts');
+      row.append(...acts);
+      card.append(row);
+    }
+    return card;
+  }
+
+  async function loadExtensions(force) {
+    if (ext.loaded && !force) return;
+    try {
+      const { status, body } = await json(EXT);
+      if (status !== 200) { toast(body.error || 'extensions unavailable', 'err'); return; }
+      ext.store = body.store;
+      ext.loaded = true;
+      const count = (body.mcp.enabled || 0) + (body.skills.enabled || 0) + (body.plugins.enabled || 0);
+      const badge = $('extCount');
+      if (badge) badge.textContent = String(count);
+      const dot = $('extDot');
+      if (dot) dot.classList.toggle('bad', !body.mcp.enabled && !body.skills.enabled && !body.plugins.enabled);
+      const storeText = $('storeText');
+      if (storeText) {
+        storeText.textContent = 'store: ' + (body.store.backend || '?') +
+          (body.store.configured ? '' : ' (not configured)');
+      }
+      if (body.unavailable && body.unavailable.length) {
+        body.unavailable.forEach((p) => toast(`extension unavailable — ${p.server || p.plugin}: ${p.error}`, 'err'));
+      }
+    } catch (err) {
+      toast('cannot reach the extensions API', 'err');
+    }
+    await Promise.all([loadMcp(), loadSkills(), loadPlugins()]);
+    loadCatalogue();
+    loadDb();
+  }
+
+  // ---- MCP ----------------------------------------------------------------
+
+  async function loadMcp() {
+    const box = $('mcpList');
+    if (!box) return;
+    const { body } = await json(`${EXT}/mcp`);
+    ext.mcp = (body && body.servers) || [];
+    box.textContent = '';
+    if (!ext.mcp.length) {
+      box.append(el('div', 'meta', 'no MCP servers yet — add one below, or copy one from Examples.'));
+      return;
+    }
+    ext.mcp.forEach((server) => {
+      const where = server.transport === 'http'
+        ? server.url
+        : `${server.command} ${(server.args || []).join(' ')}`.trim();
+      const tags = [el('span', 'tagx', server.transport)];
+      if (server.source === 'env') tags.push(el('span', 'tagx', 'env'));
+      if (server.tool_count) tags.push(el('span', 'tagx acc', `${server.tool_count} tools`));
+      if (server.has_secrets) tags.push(el('span', 'tagx', 'secrets'));
+
+      const acts = [
+        btn('test', () => testMcp(server.id)),
+        btn(server.enabled ? 'disable' : 'enable', () => toggleMcp(server.id, !server.enabled)),
+        btn('remove', () => removeMcp(server.id)),
+      ];
+      const card = itemCard(server.label || server.id, server.enabled, where, tags, acts);
+      if (server.notes) card.append(el('div', 'meta', server.notes));
+      if ((server.tools || []).length) {
+        const row = el('div', 'tools');
+        server.tools.slice(0, 12).forEach((tool) => row.append(el('span', 'tagx', tool.name)));
+        if (server.tools.length > 12) row.append(el('span', 'tagx', `+${server.tools.length - 12}`));
+        card.append(row);
+      }
+      box.append(card);
+    });
+  }
+
+  async function testMcp(id) {
+    toast(`testing ${id}…`);
+    const { status, body } = await json(`${EXT}/mcp/${encodeURIComponent(id)}/test`, { method: 'POST' });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    if (!body.ok) { toast(`${id}: ${body.error}`, 'err'); return; }
+    toast(`${id}: ${body.tool_count} tools in ${body.latency_ms} ms`, 'ok');
+    await loadMcp();
+  }
+
+  async function toggleMcp(id, enabled) {
+    const { status, body } = await json(`${EXT}/mcp/${encodeURIComponent(id)}/toggle`, {
+      method: 'POST', body: JSON.stringify({ enabled }),
+    });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    await loadMcp();
+  }
+
+  async function removeMcp(id) {
+    const { status, body } = await json(`${EXT}/mcp/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    toast(`removed ${id}`, 'ok');
+    await loadMcp();
+  }
+
+  function jsonField(value, label) {
+    const text = (value || '').trim();
+    if (!text) return {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch (err) { /* reported below */ }
+    throw new Error(`${label} must be a JSON object`);
+  }
+
+  async function saveMcp(form) {
+    let headers, env;
+    try {
+      headers = jsonField($('m_headers').value, 'headers');
+      env = jsonField($('m_env').value, 'env');
+    } catch (err) { toast(err.message, 'err'); return; }
+    const payload = {
+      id: $('m_id').value.trim(),
+      transport: $('m_transport').value,
+      url: $('m_url').value.trim(),
+      command: $('m_command').value.trim(),
+      args: $('m_args').value.trim(),
+      headers, env,
+    };
+    const { status, body } = await json(`${EXT}/mcp`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    form.reset();
+    toast(`server ${body.server.id} added — press test to list its tools`, 'ok');
+    await loadMcp();
+    loadExtensions(true);
+  }
+
+  // ---- skills -------------------------------------------------------------
+
+  async function loadSkills() {
+    const box = $('skillList');
+    if (!box) return;
+    const { body } = await json(`${EXT}/skills`);
+    ext.skills = (body && body.skills) || [];
+    box.textContent = '';
+    if (!ext.skills.length) {
+      box.append(el('div', 'meta', 'no skills yet — drop a .md or .zip above.'));
+      return;
+    }
+    ext.skills.forEach((skill) => {
+      const tags = [];
+      if (skill.files.length) tags.push(el('span', 'tagx acc', `${skill.files.length} files`));
+      if (skill.source) tags.push(el('span', 'tagx', skill.source));
+      const acts = [
+        btn('view', () => viewSkill(skill.name)),
+        btn(skill.enabled ? 'disable' : 'enable', () => patchSkill(skill.name, { enabled: !skill.enabled })),
+        btn('remove', () => removeSkill(skill.name)),
+      ];
+      const card = itemCard(skill.name, skill.enabled, skill.description, tags, acts);
+      if (skill.when_to_use) card.append(el('div', 'meta', 'use when: ' + skill.when_to_use));
+      if (skill.files.length) {
+        const row = el('div', 'tools');
+        skill.files.forEach((file) => row.append(el('span', 'tagx', file)));
+        card.append(row);
+      }
+      box.append(card);
+    });
+  }
+
+  async function uploadSkillFile(file) {
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file, file.name);
+    // No content-type header: the browser must set the multipart boundary.
+    const res = await fetch(`${EXT}/skills/upload`, { method: 'POST', headers: headers(), body: form });
+    const body = await res.json().catch(() => ({}));
+    if (res.status !== 200) { toast(body.error || `HTTP ${res.status}`, 'err'); return; }
+    toast(`skill ${body.skill.name} uploaded`, 'ok');
+    await loadSkills();
+    loadExtensions(true);
+  }
+
+  async function viewSkill(name) {
+    const { status, body } = await json(`${EXT}/skills/${encodeURIComponent(name)}`);
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    say(`SKILL · ${name}`, body.skill.body || '(empty body)', 'tool');
+    document.body.classList.add('agent-open');
+  }
+
+  async function patchSkill(name, patch) {
+    const { status, body } = await json(`${EXT}/skills/${encodeURIComponent(name)}`, {
+      method: 'PATCH', body: JSON.stringify(patch),
+    });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    await loadSkills();
+  }
+
+  async function removeSkill(name) {
+    const { status, body } = await json(`${EXT}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    toast(`removed ${name}`, 'ok');
+    await loadSkills();
+    loadExtensions(true);
+  }
+
+  async function saveSkill(form) {
+    const payload = {
+      name: $('s_name').value.trim(),
+      description: $('s_desc').value.trim(),
+      body: $('s_body').value,
+    };
+    const { status, body } = await json(`${EXT}/skills`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    form.reset();
+    toast(`skill ${body.skill.name} saved`, 'ok');
+    await loadSkills();
+    loadExtensions(true);
+  }
+
+  // ---- plugins ------------------------------------------------------------
+
+  async function loadPlugins() {
+    const box = $('pluginList');
+    if (!box) return;
+    const { body } = await json(`${EXT}/plugins`);
+    ext.plugins = (body && body.plugins) || [];
+    ext.codeAllowed = !!(body && body.code_allowed);
+    box.textContent = '';
+    if (!ext.plugins.length) {
+      box.append(el('div', 'meta', 'no plugins yet — add one below.'));
+      return;
+    }
+    ext.plugins.forEach((plugin) => {
+      const where = plugin.kind === 'http'
+        ? `${plugin.request.method} ${plugin.request.url}`
+        : `python · ${plugin.code_bytes} bytes`;
+      const tags = [el('span', 'tagx', plugin.kind)];
+      const acts = [
+        btn('test', () => testPlugin(plugin.name)),
+        btn(plugin.enabled ? 'disable' : 'enable', () => patchPlugin(plugin.name, { enabled: !plugin.enabled })),
+        btn('remove', () => removePlugin(plugin.name)),
+      ];
+      const card = itemCard(plugin.name, plugin.enabled, plugin.description, tags, acts);
+      card.append(el('div', 'meta', where));
+      const args = Object.keys((plugin.parameters && plugin.parameters.properties) || {});
+      if (args.length) {
+        const row = el('div', 'tools');
+        args.forEach((arg) => row.append(el('span', 'tagx', arg)));
+        card.append(row);
+      }
+      box.append(card);
+    });
+  }
+
+  async function testPlugin(name) {
+    const argsText = prompt(`arguments for ${name} (JSON)`, '{}');
+    if (argsText == null) return;
+    let args;
+    try { args = JSON.parse(argsText || '{}'); } catch (err) { toast('arguments must be JSON', 'err'); return; }
+    toast(`running ${name}…`);
+    const { status, body } = await json(`${EXT}/plugins/${encodeURIComponent(name)}/test`, {
+      method: 'POST', body: JSON.stringify({ args }),
+    });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    const result = body.result || {};
+    const text = result.output || result.error || JSON.stringify(result);
+    say(`PLUGIN · ${name}`, String(text).slice(0, 4000), result.error ? 'err' : 'tool');
+    toast(result.error ? `${name}: ${result.error}` : `${name}: HTTP ${result.status}`, result.error ? 'err' : 'ok');
+    document.body.classList.add('agent-open');
+  }
+
+  async function patchPlugin(name, patch) {
+    const { status, body } = await json(`${EXT}/plugins/${encodeURIComponent(name)}`, {
+      method: 'PATCH', body: JSON.stringify(patch),
+    });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    await loadPlugins();
+  }
+
+  async function removePlugin(name) {
+    const { status, body } = await json(`${EXT}/plugins/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    toast(`removed ${name}`, 'ok');
+    await loadPlugins();
+    loadExtensions(true);
+  }
+
+  async function savePlugin(form) {
+    let props = {}, bodySpec = null;
+    try {
+      props = jsonField($('p_props').value, 'arguments');
+      const rawBody = ($('p_body').value || '').trim();
+      bodySpec = rawBody ? JSON.parse(rawBody) : null;
+    } catch (err) { toast(err.message || 'body must be valid JSON', 'err'); return; }
+    const payload = {
+      name: $('p_name').value.trim(),
+      description: $('p_desc').value.trim(),
+      kind: 'http',
+      parameters: {
+        type: 'object',
+        properties: props,
+        required: Object.keys(props),
+      },
+      request: {
+        method: $('p_method').value,
+        url: $('p_url').value.trim(),
+        body: bodySpec,
+      },
+    };
+    const { status, body } = await json(`${EXT}/plugins`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    form.reset();
+    toast(`plugin ${body.plugin.name} added — press test to run it`, 'ok');
+    await loadPlugins();
+    loadExtensions(true);
+  }
+
+  // ---- database -----------------------------------------------------------
+
+  async function loadDb() {
+    const box = $('dbCard');
+    if (!box) return;
+    const { status, body } = await json(`${EXT}/db`);
+    if (status !== 200) return;
+    box.textContent = '';
+    const s = body.store || {};
+    const top = el('div', 'top');
+    top.append(el('b', '', 'backend: ' + (s.backend || '?')));
+    top.append(el('span', 'grow'));
+    top.append(el('span', 'tagx' + (body.reachable ? ' acc' : ''), body.reachable ? 'reachable' : 'unreachable'));
+    if (s.readonly) top.append(el('span', 'tagx', 'read-only'));
+    box.append(top);
+    box.append(el('div', 'meta', 'table: ' + (s.table || '?')));
+    if (body.error) box.append(el('div', 'bad-line', body.error));
+    box.append(el('div', 'meta',
+      s.backend === 'file'
+        ? 'File backend: everything works, but a redeploy wipes it.'
+        : 'Database backend: skills, MCP servers and plugins survive a redeploy.'));
+    const sql = el('pre', 'out', body.setup_sql || '');
+    box.append(sql);
+    const copy = btn('copy setup sql', () => {
+      if (global.navigator && navigator.clipboard) navigator.clipboard.writeText(body.setup_sql || '').then(() => toast('sql copied', 'ok'));
+    });
+    box.append(copy);
+  }
+
+  async function runDbQuery() {
+    const out = $('dbOut');
+    const sql = $('dbSql').value.trim();
+    if (!sql) return;
+    const { status, body } = await json(`${EXT}/db/query`, { method: 'POST', body: JSON.stringify({ sql }) });
+    if (out) {
+      out.hidden = false;
+      out.textContent = status === 200
+        ? JSON.stringify(body.rows, null, 2).slice(0, 8000)
+        : `${body.code || 'error'}: ${body.error}`;
+    }
+  }
+
+  // ---- catalogue ----------------------------------------------------------
+
+  async function loadCatalogue() {
+    const box = $('catalogue');
+    if (!box || ext.catalogue) return;
+    const { status, body } = await json(`${EXT}/catalogue`);
+    if (status !== 200) return;
+    ext.catalogue = body;
+    box.textContent = '';
+
+    (body.mcp || []).forEach((server) => {
+      const card = el('div', 'item');
+      const top = el('div', 'top');
+      top.append(el('b', '', server.label || server.id));
+      top.append(el('span', 'grow'));
+      top.append(el('span', 'tagx', server.transport));
+      card.append(top);
+      if (server.notes) card.append(el('div', 'meta', server.notes));
+      const acts = el('div', 'acts');
+      acts.append(btn('fill the MCP form', () => {
+        $('m_id').value = server.id;
+        $('m_transport').value = server.transport;
+        $('m_url').value = server.url || '';
+        $('m_command').value = server.command || '';
+        $('m_args').value = (server.args || []).join(' ');
+        $('m_headers').value = server.headers ? JSON.stringify(server.headers) : '';
+        $('m_env').value = server.env ? JSON.stringify(server.env) : '';
+        showPane('mcp');
+        toast('form filled — check it, then connect');
+      }, 'primary'));
+      card.append(acts);
+      box.append(card);
+    });
+
+    const skill = body.skill_example;
+    if (skill) {
+      const card = el('div', 'item');
+      card.append(el('div', 'top')).append(el('b', '', 'skill: ' + skill.name));
+      card.append(el('div', 'meta', skill.description));
+      const acts = el('div', 'acts');
+      acts.append(btn('fill the skill form', () => {
+        $('s_name').value = skill.name;
+        $('s_desc').value = skill.description;
+        $('s_body').value = skill.body;
+        showPane('skills');
+      }, 'primary'));
+      card.append(acts);
+      box.append(card);
+    }
+
+    const plugin = body.plugin_example;
+    if (plugin) {
+      const card = el('div', 'item');
+      card.append(el('div', 'top')).append(el('b', '', 'plugin: ' + plugin.name));
+      card.append(el('div', 'meta', plugin.description));
+      const acts = el('div', 'acts');
+      acts.append(btn('fill the plugin form', () => {
+        $('p_name').value = plugin.name;
+        $('p_desc').value = plugin.description;
+        $('p_url').value = plugin.request.url;
+        $('p_method').value = plugin.request.method;
+        $('p_props').value = JSON.stringify(plugin.parameters.properties);
+        $('p_body').value = plugin.request.body ? JSON.stringify(plugin.request.body) : '';
+        showPane('plugins');
+      }, 'primary'));
+      card.append(acts);
+      box.append(card);
+    }
+  }
+
+  function showPane(name) {
+    const panel = $('extPanel');
+    if (panel) panel.hidden = false;
+    document.querySelectorAll('.exttab').forEach((tab) => {
+      const active = tab.dataset.pane === name;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+    document.querySelectorAll('.extpane').forEach((pane) => {
+      pane.classList.toggle('active', pane.id === 'pane-' + name);
+    });
+  }
 
   function autosize(el) {
     if (!el) return;
@@ -670,6 +1139,39 @@
     on($('closePane'), 'click', () => document.body.classList.remove('agent-open'));
     on(global, 'resize', () => { screen.fit(); postResize(); });
 
+    // ---- extensions drawer ------------------------------------------------
+    on($('ext'), 'click', () => {
+      const panel = $('extPanel');
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) loadExtensions();
+    });
+    on($('extClose'), 'click', () => { const p = $('extPanel'); if (p) p.hidden = true; });
+    document.querySelectorAll('.exttab').forEach((tab) => {
+      on(tab, 'click', () => showPane(tab.dataset.pane));
+    });
+    on($('mcpForm'), 'submit', (e) => { e.preventDefault(); saveMcp(e.target); });
+    on($('skillForm'), 'submit', (e) => { e.preventDefault(); saveSkill(e.target); });
+    on($('pluginForm'), 'submit', (e) => { e.preventDefault(); savePlugin(e.target); });
+    on($('dbRun'), 'click', runDbQuery);
+
+    // The drop zone is a real file input: click, drop and keyboard all work.
+    const drop = $('skillDrop');
+    const fileInput = $('skillFile');
+    if (drop && fileInput) {
+      on(drop, 'click', () => fileInput.click());
+      on(fileInput, 'change', () => { uploadSkillFile(fileInput.files && fileInput.files[0]); fileInput.value = ''; });
+      ['dragenter', 'dragover'].forEach((name) => on(drop, name, (e) => {
+        e.preventDefault(); drop.classList.add('over');
+      }));
+      ['dragleave', 'drop'].forEach((name) => on(drop, name, (e) => {
+        e.preventDefault(); drop.classList.remove('over');
+      }));
+      on(drop, 'drop', (e) => {
+        const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        uploadSkillFile(file);
+      });
+    }
+
     // Shortcuts — Alt+… never collides with a shell running in the xterm.
     on(global, 'keydown', (e) => {
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
@@ -712,6 +1214,8 @@
     loadSessions, renderTabs, select, attach, onChunk,
     newSession, closeSession, renameSession, renameActive, send, postResize, buildTerminal,
     loadProviders, renderProviders, saveProvider, ask, boot, say,
+    ext, loadExtensions, loadMcp, loadSkills, loadPlugins, loadDb, loadCatalogue,
+    showPane, uploadSkillFile, runDbQuery,
   };
 
   global.NovaTerminalConsole = NovaTerminalConsole;

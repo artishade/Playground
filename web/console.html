@@ -255,6 +255,84 @@ textarea::placeholder, input::placeholder { color: var(--dim-2); }
 kbd { font: 10px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px;
       border-radius: 5px; padding: 1px 5px; color: var(--dim); background: var(--panel); }
 
+/* ------------------------------------------------------------ extensions */
+.drawer {
+  position: fixed; inset: 0; z-index: 35; display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--bg) 97%, transparent);
+  backdrop-filter: blur(20px) saturate(140%);
+  animation: fade .18s ease-out;
+}
+.drawer[hidden] { display: none; }
+@keyframes fade { from { opacity: 0 } }
+.drawer-head {
+  display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.drawer .tabs {
+  display: flex; gap: 6px; padding: 10px 16px 0; border-bottom: 1px solid var(--line);
+  overflow-x: auto; flex: none;
+}
+.exttab {
+  border: 1px solid transparent; border-bottom: 0; background: transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0; color: var(--dim);
+  padding: 7px 13px; font: 500 12px var(--mono); cursor: pointer; white-space: nowrap;
+}
+.exttab:hover { color: var(--fg); }
+.exttab.active {
+  color: var(--fg); border-color: var(--line); background: var(--panel);
+  box-shadow: inset 0 2px 0 0 var(--acc1);
+}
+.drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 18px 16px 40px; }
+.drawer-body .extpane { display: none; max-width: 980px; margin: 0 auto; }
+.drawer-body .extpane.active { display: block; }
+.lead { color: var(--dim); font-size: 13px; margin: 0 0 16px; line-height: 1.6; }
+.lead code, .hint code { font: 11.5px var(--mono); color: var(--acc2);
+  background: color-mix(in srgb, var(--acc2) 10%, transparent); padding: 1px 5px; border-radius: 5px; }
+
+.cards { display: grid; gap: 10px; margin-bottom: 16px; }
+.card {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  padding: 13px 15px; display: flex; flex-direction: column; gap: 9px;
+}
+.card > b { font: 600 12px var(--mono); letter-spacing: .06em; }
+.card .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.card .row3 { display: grid; grid-template-columns: auto 1fr auto; gap: 9px; align-items: center; }
+@media (max-width: 620px) { .card .row2, .card .row3 { grid-template-columns: 1fr; } }
+
+.item {
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
+}
+.item.on { border-color: color-mix(in srgb, var(--acc3) 40%, var(--line)); }
+.item.off { opacity: .55; }
+.item .top { display: flex; align-items: center; gap: 9px; }
+.item .top b { font: 600 12.5px var(--mono); }
+.item .top .grow { flex: 1; }
+.item .meta { font: 11px var(--mono); color: var(--dim-2); word-break: break-all; }
+.item .tools { display: flex; flex-wrap: wrap; gap: 5px; }
+.tagx {
+  font: 10.5px var(--mono); border: 1px solid var(--line); border-radius: 999px;
+  padding: 2px 8px; color: var(--dim);
+}
+.tagx.acc { color: var(--acc3); border-color: color-mix(in srgb, var(--acc3) 40%, var(--line)); }
+.item .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.item .acts button { padding: 4px 9px; font-size: 11px; }
+
+.drop {
+  border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 22px;
+  text-align: center; cursor: pointer; display: flex; flex-direction: column; gap: 5px;
+  margin-bottom: 16px; transition: border-color .16s, background .16s;
+}
+.drop:hover, .drop.over { border-color: var(--acc2); background: color-mix(in srgb, var(--acc2) 6%, transparent); }
+.drop b { font: 600 12.5px var(--mono); }
+pre.out {
+  margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 80%, #000); font: 11.5px/1.6 var(--mono);
+  color: var(--term-fg); overflow: auto; max-height: 320px; white-space: pre-wrap;
+}
+.ok-line { font: 11.5px var(--mono); color: var(--acc3); }
+.bad-line { font: 11.5px var(--mono); color: var(--err); }
+
 /* ---------------------------------------------------------------- toasts */
 #toasts { position: fixed; right: 14px; bottom: 14px; z-index: 40; display: flex;
           flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
@@ -331,6 +409,8 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-bottom-width
       <option value="glacier">glacier</option>
       <option value="ember">ember</option>
     </select>
+    <button id="ext" type="button" class="icon" title="extensions — MCP, skills, plugins, database"
+            aria-label="extensions">⧉ <span id="extCount" class="hide-sm">0</span></button>
     <button id="new" type="button" class="primary">+ shell</button>
     <button id="clear" type="button" class="icon" aria-label="clear the view" title="clear view (Alt+K)">clear</button>
     <button id="paneToggle" type="button" class="icon" aria-label="toggle agent pane" title="agent pane">agent</button>
@@ -386,6 +466,133 @@ kbd { font: 10px var(--mono); border: 1px solid var(--line); border-bottom-width
 </div>
 
 <div id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+<!-- ==================================================== extensions drawer -->
+<div id="extPanel" class="drawer" hidden aria-label="Agent extensions">
+  <div class="drawer-head">
+    <span class="pill"><span class="dot" id="extDot"></span><b>EXTENSIONS</b></span>
+    <span class="grow"></span>
+    <span class="pill" id="storePill" title="where skills, MCP servers and plugins are kept">
+      <span id="storeText">store: —</span>
+    </span>
+    <button id="extClose" type="button" class="icon" aria-label="close extensions">×</button>
+  </div>
+
+  <nav class="tabs" id="extTabs" role="tablist" aria-label="extension sections">
+    <button type="button" class="exttab active" data-pane="mcp" role="tab" aria-selected="true">MCP servers</button>
+    <button type="button" class="exttab" data-pane="skills" role="tab" aria-selected="false">Skills</button>
+    <button type="button" class="exttab" data-pane="plugins" role="tab" aria-selected="false">Plugins</button>
+    <button type="button" class="exttab" data-pane="db" role="tab" aria-selected="false">Database</button>
+    <button type="button" class="exttab" data-pane="catalogue" role="tab" aria-selected="false">Examples</button>
+  </nav>
+
+  <div class="drawer-body">
+    <!-- ---------------------------------------------------------- MCP -->
+    <section class="extpane active" id="pane-mcp" role="tabpanel">
+      <p class="lead">Connect Model Context Protocol servers. Their tools join the agent's
+        toolbox automatically — namespaced <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>, so two
+        servers can both expose <code>search</code>.</p>
+      <div id="mcpList" class="cards"></div>
+      <form id="mcpForm" class="stack card">
+        <b>add a server</b>
+        <div class="row2">
+          <input id="m_id" placeholder="id — github" aria-label="server id" required>
+          <select id="m_transport" aria-label="transport">
+            <option value="http">http (remote)</option>
+            <option value="stdio">stdio (local command)</option>
+          </select>
+        </div>
+        <input id="m_url" placeholder="url — https://host/mcp" aria-label="server url">
+        <div class="row2">
+          <input id="m_command" placeholder="command — npx" aria-label="command">
+          <input id="m_args" placeholder="args — -y @modelcontextprotocol/server-fetch" aria-label="arguments">
+        </div>
+        <input id="m_headers" placeholder='headers JSON — {"authorization":"Bearer ${env.TOKEN}"}' aria-label="headers">
+        <input id="m_env" placeholder='env JSON — {"GITHUB_PERSONAL_ACCESS_TOKEN":"${env.GITHUB_TOKEN}"}' aria-label="environment">
+        <span class="hint">Use <code>${env.NAME}</code> in headers/env so secrets live in the
+          deployment, never in this form.</span>
+        <button type="submit" class="primary">connect server</button>
+      </form>
+    </section>
+
+    <!-- ------------------------------------------------------- Skills -->
+    <section class="extpane" id="pane-skills" role="tabpanel">
+      <p class="lead">Upload instructions the agent loads on demand. A <code>.md</code> with
+        frontmatter is one skill; a <code>.zip</code> with a <code>SKILL.md</code> is a bundle,
+        and its other files ship with it.</p>
+      <div class="drop" id="skillDrop">
+        <input type="file" id="skillFile" accept=".md,.zip,.markdown" hidden>
+        <b>drop a .md or .zip here</b>
+        <span class="hint">or click to choose — 10 MB max</span>
+      </div>
+      <div id="skillList" class="cards"></div>
+      <form id="skillForm" class="stack card">
+        <b>or write one</b>
+        <input id="s_name" placeholder="name — release-notes" aria-label="skill name" required>
+        <input id="s_desc" placeholder="description — one line the agent sees in its index" aria-label="description" required>
+        <textarea id="s_body" rows="4" placeholder="instructions…" aria-label="instructions"></textarea>
+        <button type="submit" class="primary">save skill</button>
+      </form>
+    </section>
+
+    <!-- ------------------------------------------------------ Plugins -->
+    <section class="extpane" id="pane-plugins" role="tabpanel">
+      <p class="lead">Declarative tools: a name, an argument schema and a URL. The host runs
+        <b>no third-party code</b> — templating <code>${arg}</code> and <code>${env.NAME}</code>
+        into the request is the whole mechanism.</p>
+      <div id="pluginList" class="cards"></div>
+      <form id="pluginForm" class="stack card">
+        <b>add a plugin</b>
+        <input id="p_name" placeholder="name — notify-slack" aria-label="plugin name" required>
+        <input id="p_desc" placeholder="description — Post a message to Slack" aria-label="plugin description" required>
+        <input id="p_url" placeholder="url — ${env.SLACK_WEBHOOK_URL}" aria-label="request url" required>
+        <div class="row2">
+          <select id="p_method" aria-label="http method">
+            <option>POST</option><option>GET</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
+          </select>
+          <input id="p_props" placeholder='args JSON — {"text":{"type":"string"}}' aria-label="argument properties">
+        </div>
+        <input id="p_body" placeholder='body JSON — {"text":"${text}"}' aria-label="request body">
+        <span class="hint">A property listed here becomes a required tool argument unless you
+          leave the field blank.</span>
+        <button type="submit" class="primary">add plugin</button>
+      </form>
+    </section>
+
+    <!-- ----------------------------------------------------- Database -->
+    <section class="extpane" id="pane-db" role="tabpanel">
+      <p class="lead">Skills, MCP servers and plugins are stored through one pluggable backend.
+        <b>file</b> needs nothing; <b>supabase</b> and <b>postgres</b> (Neon, Supabase, Railway)
+        make them survive a redeploy — and give the agent a real <code>sql</code> tool.</p>
+      <div id="dbCard" class="card"></div>
+      <div class="card">
+        <b>run a statement</b>
+        <textarea id="dbSql" rows="3" placeholder="select now();" aria-label="sql statement"></textarea>
+        <button id="dbRun" type="button" class="primary">run</button>
+        <pre id="dbOut" class="out" hidden></pre>
+      </div>
+      <div class="card">
+        <b>point this host at a database</b>
+        <pre class="out">NOVA_STORE_BACKEND=supabase
+NOVA_STORE_URL=https://&lt;project&gt;.supabase.co
+NOVA_STORE_KEY=&lt;service_role key&gt;
+
+# or a DSN — Neon, Supabase, Railway, anything Postgres:
+NOVA_STORE_BACKEND=postgres
+NOVA_STORE_URL=postgresql://user:pass@host/db
+NOVA_STORE_READONLY=1        # optional: sql tool becomes SELECT-only</pre>
+        <span class="hint">The postgres backend needs <code>pip install asyncpg</code>; supabase
+          does not (it uses the REST API).</span>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Examples -->
+    <section class="extpane" id="pane-catalogue" role="tabpanel">
+      <p class="lead">Copy-paste starting points. Each button fills the matching form.</p>
+      <div id="catalogue" class="cards"></div>
+    </section>
+  </div>
+</div>
 
 <script src="/static/console.js"></script>
 <script>

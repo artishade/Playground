@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Terminal runtime state — never commit these. They hold credentials.
+#   .agentbox-providers.json  saved model providers, including API keys (0600)
+#   .nova-store/              MCP servers, skills and plugins, incl. masked secrets
+.agentbox-providers.json
+.nova-store/
+app_build/
+build/
+
+# Local config / env
+.env
+.env.*
+
+# Editors and OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/

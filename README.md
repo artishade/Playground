@@ -24,8 +24,13 @@ NovaRouter gateway pointing at it.
 | `link.py` | The seam. `LocalLink` (shells in this process) / `RemoteLink` (HTTP + SSE to another host), chosen by configuration |
 | `api.py` | The HTTP contract — mounted by **both** hosts, so they cannot drift |
 | `agentbox.py` | **Agentbox**, the AI agent that ships with the terminal (`/agent/*`) |
+| `extensions.py` | The extension surface: MCP servers, skills, plugins, database (`/agent/extensions/*`) |
+| `mcp.py` | MCP client — Streamable HTTP + stdio, tool namespacing, per-turn tool bridge |
+| `skills.py` | Uploadable `SKILL.md` / `.zip` bundles, with progressive disclosure into the prompt |
+| `plugins.py` | Declarative HTTP tools (safe default) and opt-in local Python plugins |
+| `store.py` | Pluggable persistence: `file` (default) · `supabase` · `postgres` (Neon/Railway/…) |
 | `web/console.html` | **The console page** — shell tabs on one side, the agent on the other. Served at `/` |
-| `web/console.js` | Its client: session tabs, SSE stream, xterm.js (with a plain-viewer fallback), chat, providers, themes, shortcuts |
+| `web/console.js` | Its client: session tabs, SSE stream, xterm.js (with a plain-viewer fallback), chat, providers, themes, shortcuts, extensions drawer |
 | `service.py` | The standalone host: `python3 -m terminal.service` |
 | `config.py` | Every `NOVA_TERMINAL_*` / `NOVA_AGENTBOX_*` knob |
 | `Dockerfile` | Builds this directory **alone** — no gateway, no database, no UI |
@@ -182,3 +187,136 @@ curl -XPOST http://terminal-host:3100/agent/chat \
 - With no provider at all the agent stays off and says so: `503` with
   `code: agentbox_unconfigured`, and `/health` reports
   `agentbox.configured: false`. It never calls out on its own.
+
+## Extensions — MCP servers, skills, plugins, and a database
+
+The agent's built-in tools are five shell-shaped verbs plus `read_skill`,
+`read_skill_file` and `sql`. Everything else it can do is added here, through one
+router (`/agent/extensions/*`) and one console drawer (**⧉** in the topbar).
+
+### MCP servers
+
+Connect Model Context Protocol servers and their tools join the agent's toolbox
+automatically. Two transports:
+
+```bash
+# Remote (Streamable HTTP). Secrets come from the host environment:
+curl -XPOST http://host:3100/agent/extensions/mcp \
+  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
+  -d '{"id":"remote","url":"https://mcp.example.com/mcp",
+       "headers":{"authorization":"Bearer ${env.MCP_TOKEN}"}}'
+
+# Local (stdio) — the usual `npx` servers:
+curl -XPOST http://host:3100/agent/extensions/mcp \
+  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
+  -d '{"id":"fetch","transport":"stdio","command":"npx",
+       "args":["-y","@modelcontextprotocol/server-fetch"]}'
+
+curl -XPOST http://host:3100/agent/extensions/mcp/fetch/test   # connect + list tools
+```
+
+- Tools are namespaced `mcp__<server>__<tool>` before the model sees them, so two
+  servers can both expose `search` — and a tool call routes back by parsing the name.
+- `tools/list` is cached for 5 minutes; the agent does not pay a round trip per message.
+- **One broken server never breaks the agent.** It is reported in the reply's
+  `extensions` field and on the console, and skipped.
+- `NOVA_MCP_SERVERS` bakes servers in at deploy time (JSON array); those are
+  read-only over the API.
+
+### Skills
+
+Upload a `.md` with frontmatter, or a `.zip` bundle containing a `SKILL.md`
+plus any files it references:
+
+```
+POST /agent/extensions/skills/upload        multipart, field `file`
+```
+
+```markdown
+---
+name: release-notes
+description: Turn a git log into user-facing release notes.
+when_to_use: When the user asks for a changelog.
+---
+
+1. Run `git log --oneline <last-tag>..HEAD`.
+2. Group commits into Added / Changed / Fixed.
+```
+
+Skills use **progressive disclosure**: the system prompt carries only a one-line
+index per skill, and the agent calls `read_skill` when a task matches. A library
+of twenty skills costs twenty lines of context, not twenty documents. Bundle
+files are readable with `read_skill_file`.
+
+### Plugins
+
+A declarative plugin is a name, an argument schema, and a request — **the host
+runs no third-party code**:
+
+```bash
+curl -XPOST http://host:3100/agent/extensions/plugins \
+  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
+  -d '{"name":"notify-slack","description":"Post to Slack",
+       "parameters":{"type":"object",
+                     "properties":{"text":{"type":"string"}},"required":["text"]},
+       "request":{"method":"POST","url":"${env.SLACK_WEBHOOK_URL}",
+                  "body":{"text":"${text}"}}}'
+```
+
+`${arg}` comes from the model's tool call, `${env.NAME}` from the host
+environment — so a token lives in the deployment and never in the model's
+context. A plugin that needs real code is a `kind: "python"` plugin with a
+`run(args)` function, enabled only with `NOVA_PLUGINS_ALLOW_CODE=1` (same trust
+level as the shell, which is why it is opt-in).
+
+### The database — `file` by default, Supabase/Neon when you want it
+
+Skills, MCP servers and plugins are stored through one pluggable backend, so
+`terminal/` still needs **no database** out of the box:
+
+| `NOVA_STORE_BACKEND` | What it is | SQL tool | Needs |
+| --- | --- | --- | --- |
+| `file` *(default)* | JSON under `<workspace>/.nova-store/` | ✗ | nothing |
+| `supabase` | PostgREST, table `nova_docs` | ✗ | project URL + service key |
+| `postgres` | DSN — Neon, Supabase, Railway, RDS | ✓ | `pip install asyncpg` |
+
+```bash
+NOVA_STORE_BACKEND=supabase
+NOVA_STORE_URL=https://<project>.supabase.co
+NOVA_STORE_KEY=<service_role key>
+
+# or one DSN, which also gives the agent a real `sql` tool:
+NOVA_STORE_BACKEND=postgres
+NOVA_STORE_URL=postgresql://user:pass@host/db
+NOVA_STORE_READONLY=1     # optional: the sql tool becomes SELECT-only
+```
+
+The table is created on first use by the postgres backend; for Supabase REST,
+`GET /agent/extensions/db` returns the exact setup SQL to paste into the editor.
+A redeploy wipes a container's disk — a database is how your skills and servers
+survive it.
+
+### The extension API, in one place
+
+```
+GET    /agent/extensions                 what is installed, and on which backend
+GET    /agent/extensions/tools           every extra tool the agent would see
+GET    /agent/extensions/catalogue       ready-made examples for every section
+
+GET/POST/DELETE /agent/extensions/mcp[/{id}]
+POST   /agent/extensions/mcp/{id}/test | /toggle
+
+GET/POST /agent/extensions/skills        PATCH/DELETE /agent/extensions/skills/{name}
+POST   /agent/extensions/skills/upload   (.md or .zip)
+
+GET/POST /agent/extensions/plugins       PATCH/DELETE /agent/extensions/plugins/{name}
+POST   /agent/extensions/plugins/upload  (.json, or .py on a code-enabled host)
+POST   /agent/extensions/plugins/{name}/test
+
+GET    /agent/extensions/db              the store + the setup SQL
+POST   /agent/extensions/db/query        one statement (postgres backends)
+```
+
+Nothing in this surface ever echoes a secret: API keys, tokens and auth headers
+come back masked, and a plugin's code is returned only on a host that already
+allows it to run.

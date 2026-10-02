@@ -45,6 +45,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from . import config
+from . import mcp as mcp_client
+from . import plugins as plugin_registry
+from . import skills as skill_registry
+from . import store as store_module
 from .link import TerminalError, current
 from .pty import agent_label
 
@@ -131,6 +135,42 @@ TOOLS: list[dict[str, Any]] = [
             }, ["summary"]),
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill",
+            "description": ("Load the instructions of one of your skills by name. "
+                            "The <skills> index lists what exists; read the matching "
+                            "skill before doing a task it covers."),
+            "parameters": _schema({
+                "name": {"type": "string", "description": "Skill name from the index."},
+            }, ["name"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_skill_file",
+            "description": "Read a file that ships inside a skill (a script, template or reference doc).",
+            "parameters": _schema({
+                "name": {"type": "string", "description": "Skill name."},
+                "path": {"type": "string", "description": "File path inside the skill."},
+            }, ["name", "path"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sql",
+            "description": ("Run one SQL statement against the configured database and get rows back. "
+                            "Use it for real queries; use run_command only for shell work."),
+            "parameters": _schema({
+                "sql": {"type": "string", "description": "A single statement — no trailing semicolon."},
+                "params": {"type": "array", "description": "Positional parameters ($1, $2 …).",
+                           "items": {}},
+            }, ["sql"]),
+        },
+    },
 ]
 
 
@@ -147,7 +187,22 @@ def _resolve_path(raw: str) -> str:
 
 
 async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
-    """One tool call. Everything that can be typed is typed into a real tab."""
+    """One tool call.
+
+    Shell-shaped tools are typed into a real tab the user can watch; extension
+    tools (MCP, plugins, skills, sql) go straight to their own endpoint. The
+    routing is by name, so a tool the model invented fails loudly instead of
+    quietly doing nothing.
+    """
+    # --- MCP: `mcp__<server>__<tool>` routes back to its server ---------------
+    if (route := mcp_client.parse_tool_name(name)) is not None:
+        server_id, tool_name = route
+        return await mcp_client.call_tool(server_id, tool_name, args)
+
+    # --- Plugins: `plugin__<name>` -------------------------------------------
+    if (plugin_name := plugin_registry.parse_tool_name(name)) is not None:
+        return await plugin_registry.call_plugin(plugin_name, args)
+
     if name == "run_command":
         command = str(args.get("command") or "").strip()
         if not command:
@@ -195,6 +250,29 @@ async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
             {"id": s["id"], "label": s["label"], "cwd": s.get("cwd")}
             for s in (state.get("sessions") or [])
         ]}
+
+    if name == "read_skill":
+        return await skill_registry.read(str(args.get("name") or ""))
+
+    if name == "read_skill_file":
+        return await skill_registry.read_file(str(args.get("name") or ""),
+                                              str(args.get("path") or ""))
+
+    if name == "sql":
+        statement = str(args.get("sql") or "").strip()
+        if not statement:
+            return {"error": "sql is required"}
+        params = args.get("params") if isinstance(args.get("params"), list) else None
+        try:
+            rows = await store_module.get_store().sql(statement, params)
+        except store_module.StoreUnavailable as err:
+            # A file/supabase store has no SQL — say which backend this is and
+            # what to set, because the model can act on that.
+            return {"error": str(err), "code": err.code,
+                    "store": store_module.describe()}
+        except store_module.StoreError as err:
+            return {"error": str(err), "code": err.code}
+        return {"rows": rows[:200], "count": len(rows)}
 
     return {"error": f"unknown tool: {name}"}
 
@@ -405,11 +483,55 @@ async def _resolve_model(provider: Provider, client: httpx.AsyncClient) -> str:
     return "gpt-4o-mini"
 
 
+async def _extra_tools() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """MCP + plugin tools for one turn, plus whatever failed to load.
+
+    Failure is not fatal by design: a dead MCP server is reported to the caller
+    and the agent carries on with the tools it does have.
+    """
+    problems: list[dict[str, Any]] = []
+    try:
+        mcp_tools = await mcp_client.tool_definitions(problems)
+    except Exception as err:                      # noqa: BLE001 — never break a chat
+        mcp_tools = []
+        problems.append({"server": "*", "error": f"{err.__class__.__name__}: {err}"})
+    try:
+        plugin_tools = await plugin_registry.tool_definitions()
+    except Exception as err:                      # noqa: BLE001
+        plugin_tools = []
+        problems.append({"plugin": "*", "error": f"{err.__class__.__name__}: {err}"})
+    return mcp_tools + plugin_tools, problems
+
+
+async def _system_prompt() -> str:
+    """The base prompt plus the skills index and a note about the database.
+
+    The skills index is the only per-turn cost of a skill library: a name and a
+    description each. The bodies stay on disk until `read_skill` asks for one.
+    """
+    parts = [SYSTEM_PROMPT]
+    try:
+        index = await skill_registry.index_prompt()
+    except Exception:                             # noqa: BLE001
+        index = ""
+    if index:
+        parts.append(index)
+    info = store_module.describe()
+    if info["backend"] != "file":
+        parts.append(
+            f"A {info['backend']} database is connected. Use the `sql` tool for real "
+            "queries instead of guessing at data through the shell."
+        )
+    return "\n\n".join(parts)
+
+
 async def _chat(client: httpx.AsyncClient, model: str,
-                messages: list[dict[str, Any]], tools: bool = True) -> dict:
+                messages: list[dict[str, Any]], tools: bool = True,
+                extra_tools: list[dict[str, Any]] | None = None) -> dict:
     body: dict[str, Any] = {"model": model, "messages": messages}
     if tools:
-        body["tools"] = TOOLS
+        # Built-ins first, then whatever MCP and plugins contribute this turn.
+        body["tools"] = TOOLS + (extra_tools or [])
     res = await client.post("/chat/completions", json=body)
     if res.status_code >= 400:
         detail = res.text[:300].strip()
@@ -498,26 +620,30 @@ async def chat(request: Request):
     label = body.get("label") if isinstance(body.get("label"), str) else ""
     label = label or agent_label(message)
     history = body.get("history") if isinstance(body.get("history"), list) else []
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": await _system_prompt()}]
     for turn in history[-REPLY_HISTORY:]:
         if isinstance(turn, dict) and turn.get("role") in ("user", "assistant"):
             messages.append({"role": turn["role"],
                              "content": str(turn.get("content") or "")[:8000]})
     messages.append({"role": "user", "content": message.strip()})
 
+    # Everything the agent gained beyond its five built-ins: MCP servers and
+    # plugins. Loaded once per turn, and a failure to load is reported, not fatal.
+    extra_tools, problems = await _extra_tools()
+
     steps: list[dict[str, Any]] = []
     async with _client(provider) as client:
         try:
             model = await _resolve_model(provider, client)
             for _ in range(config.AGENTBOX_MAX_STEPS):
-                reply = await _chat(client, model, messages)
+                reply = await _chat(client, model, messages, extra_tools=extra_tools)
                 calls = _tool_calls(reply)
                 messages.append({k: v for k, v in reply.items() if v is not None})
 
                 if not calls:
                     return {"ok": True, "model": model, "provider": provider.id,
                             "reply": str(reply.get("content") or "").strip(),
-                            "steps": steps}
+                            "steps": steps, "extensions": problems}
 
                 for call in calls:
                     try:
@@ -536,7 +662,8 @@ async def chat(request: Request):
                     if call["name"] == "finish":
                         summary = str(call["args"].get("summary") or "").strip()
                         return {"ok": True, "model": model, "provider": provider.id,
-                                "reply": summary or "Done.", "steps": steps}
+                                "reply": summary or "Done.", "steps": steps,
+                                "extensions": problems}
         except httpx.HTTPError as err:
             return JSONResponse(
                 {"error": f"the model endpoint is not answering ({err.__class__.__name__}).",

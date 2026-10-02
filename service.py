@@ -45,6 +45,8 @@ from terminal.config import (
     TERMINAL_SERVICE_TOKEN,
     build_root,
 )
+from terminal.extensions import router as extensions_router
+from terminal.store import describe as store_describe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("terminal.service")
@@ -120,6 +122,11 @@ app.include_router(terminal_api_router, prefix="/terminal/pty", tags=["terminal"
 # (/api/agent/*), so the two never compete for the same routes.
 app.include_router(agentbox_router, prefix="/agent", tags=["agent"])
 
+# Extensions — MCP servers, skills and plugins the agent can be given. Nested
+# under /agent so the agent owns everything it can use, and so the console has
+# one prefix to talk to.
+app.include_router(extensions_router, prefix="/agent/extensions", tags=["extensions"])
+
 
 # --------------------------------------------------------------------------- #
 # The page — a terminal hosted alone still has to be *usable* in a browser:
@@ -172,6 +179,7 @@ async def health():
         "public_url": TERMINAL_PUBLIC_URL or None,
         "auth_required": bool(TERMINAL_SERVICE_TOKEN),
         "agentbox": agentbox_status(),
+        "store": store_describe(),
     })
 
 
