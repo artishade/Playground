@@ -425,6 +425,10 @@ class PostgresStore:
 
 _STORE: Store | None = None
 _STORE_LOCK = threading.Lock()
+# The resolved active database account, cached because get_store() is sync
+# and the lookup is not. `loaded` distinguishes "not asked yet" from
+# "asked, and there is no account active".
+_ACCOUNT_CACHE: dict[str, Any] = {"loaded": False, "value": None}
 
 
 def describe() -> dict[str, Any]:
@@ -446,19 +450,19 @@ def describe() -> dict[str, Any]:
 
 
 def get_store() -> Store:
-    """The process-wide store. Selection is configuration, so it is cached."""
+    """The process-wide store. Selection is configuration, so it is cached.
+
+    An **active database account** wins over the environment. That is what makes
+    switching accounts mean something: with `work` active the agent's `sql` tool
+    talks to the work database, and with `personal` active it talks to that one,
+    with no restart and no edited environment.
+    """
     global _STORE
     with _STORE_LOCK:
         if _STORE is not None:
             return _STORE
-        backend = env.get("STORE_BACKEND").strip().lower()
-        url = env.get("STORE_URL").strip()
-        key = env.get("STORE_KEY").strip()
-        table = env.get("STORE_TABLE") or DEFAULT_TABLE
-        readonly = env.flag("STORE_READONLY")
 
-        if not backend:
-            backend = "postgres" if url else "file"
+        backend, url, key, table, readonly = _resolve_config()
 
         if backend == "file":
             _STORE = FileStore()
@@ -468,14 +472,87 @@ def get_store() -> Store:
             _STORE = PostgresStore(url, table, readonly)
         else:
             raise StoreUnavailable(
-                f"unknown AGENT_LINUX_STORE_BACKEND '{backend}' — use file, supabase or postgres"
+                f"unknown store backend '{backend}' — use file, supabase or postgres"
             )
         log.info("store: %s backend selected%s", _STORE.kind, " (read-only)" if readonly else "")
         return _STORE
 
 
+def _resolve_config() -> tuple[str, str, str, str, bool]:
+    """Where the store settings come from: an active account, else the environment.
+
+    Imported lazily because `accounts.py` imports this module — the dependency is
+    one-way at import time and only exists at call time.
+    """
+    table = env.get("STORE_TABLE") or DEFAULT_TABLE
+    readonly = env.flag("STORE_READONLY")
+
+    try:
+        from . import accounts
+
+        override = _active_account_config(accounts)
+    except Exception as err:                       # noqa: BLE001 — never break the store
+        log.debug("store: account lookup skipped (%s)", err)
+        override = None
+
+    if override:
+        backend = (override.get("backend") or "").strip().lower()
+        log.info("store: using the active %s account '%s'",
+                 override.get("provider", backend), override.get("name", "?"))
+        return (backend, override.get("url", ""), override.get("key", ""),
+                table, bool(override.get("readonly", readonly)))
+
+    backend = env.get("STORE_BACKEND").strip().lower()
+    url = env.get("STORE_URL").strip()
+    key = env.get("STORE_KEY").strip()
+    if not backend:
+        backend = "postgres" if url else "file"
+    return backend, url, key, table, readonly
+
+
+def _active_account_config(accounts: Any) -> dict[str, Any] | None:
+    """The resolved active database account, from the cache.
+
+    This is a pure read. The cache is *written* by `set_active_account()`, which
+    the async account routes call — they can await, this cannot. That split is
+    the whole design: `get_store()` stays synchronous and correct, and switching
+    accounts is immediate because the writer runs before the reader.
+    """
+    if not _ACCOUNT_CACHE["loaded"]:
+        # Nothing has resolved the account yet. The startup warm-up and every
+        # account route populate this, so an empty cache means "no account is
+        # active" rather than "not asked".
+        return None
+    return _ACCOUNT_CACHE["value"]
+
+
+def set_active_account(config: dict[str, Any] | None) -> None:
+    """Record the resolved active account. Called by the async account routes.
+
+    A `None` here is a real answer — "no database account is active" — which
+    is why `loaded` is tracked separately from the value.
+    """
+    _ACCOUNT_CACHE["value"] = config
+    _ACCOUNT_CACHE["loaded"] = True
+    if config:
+        log.info("store: active %s account '%s' will be used",
+                 config.get("provider", config.get("backend")), config.get("name", "?"))
+
+
+def reset_account_cache() -> None:
+    """Forget the cached active account — call this when one is activated."""
+    _ACCOUNT_CACHE["value"] = None
+    _ACCOUNT_CACHE["loaded"] = False
+
+
 def reset_store() -> None:
-    """Drop the cached store — tests, and a config change at runtime."""
+    """Drop the cached store, so the next call rebuilds it.
+
+    Note what this does *not* do: it leaves the resolved active account alone.
+    `set_active_account()` writes that, and clearing it here would throw away the
+    answer the caller had just published — which is exactly the bug that made
+    "activate a database account" appear to do nothing.
+    """
     global _STORE
     with _STORE_LOCK:
         _STORE = None

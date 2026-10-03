@@ -18,3 +18,6 @@ httpx>=0.27
 # Install either only on a host that wants it:
 #   pip install playwright && python3 -m playwright install --with-deps chromium
 #   pip install asyncpg
+# The credential vault (SSH keys, account secrets). Without it those routes
+# answer vault_unavailable and nothing else is affected.
+cryptography>=42

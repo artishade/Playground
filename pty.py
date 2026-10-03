@@ -106,7 +106,8 @@ class TerminalSession:
     """One independent shell: its own PTY, scrollback, cwd and lifecycle."""
 
     def __init__(self, session_id: str, cwd: str = "", cols: int = 120, rows: int = 32,
-                 label: str = ""):
+                 label: str = "", argv: list[str] | None = None,
+                 env: dict[str, str] | None = None):
         self.id = session_id
         self.created_at = time.time()
         self.last_activity = self.created_at
@@ -120,10 +121,17 @@ class TerminalSession:
         self.label = label.strip() or _default_label(self.cwd)
         self.cols = max(20, min(500, int(cols or 120)))
         self.rows = max(5, min(200, int(rows or 32)))
+        # A session is normally an interactive bash. `argv` lets it be something
+        # else on the same PTY — an `ssh` client, most importantly — so a remote
+        # connection is a real tab the user can watch and type into, rather than
+        # a subprocess whose output has to be proxied. `env` is layered on top of
+        # the shell environment for the same reason (SSH_ASKPASS, config paths).
+        self.argv = list(argv) if argv else None
+        self.extra_env = dict(env or {})
 
         self._osc_tail = b""
         self.pid, self.master = pty.fork()
-        if self.pid == 0:  # child — exec the shell
+        if self.pid == 0:  # child — exec the shell (or the requested command)
             try:
                 os.chdir(self.cwd)
             except OSError:
@@ -139,10 +147,18 @@ class TerminalSession:
             os.environ["PS1"] = _PROMPT
             os.environ["PROMPT_COMMAND"] = _OSC7_PROMPT_COMMAND
             os.environ["AGENT_LINUX_GATEWAY"] = "1"
+            os.environ.update(self.extra_env)
+            if self.argv:
+                # The command owns the PTY: no rcfile, no prompt, no MOTD —
+                # `ssh` draws its own UI and expects a clean terminal.
+                try:
+                    os.execvp(self.argv[0], self.argv)
+                except OSError:
+                    os._exit(127)
             # Preferred path: bash with our rcfile, so the branded prompt and
             # MOTD always win over the image's /root/.bashrc.
             try:
-                rcfile = f"/tmp/.nova_bashrc_{os.getpid()}.rc"
+                rcfile = f"/tmp/.agent_linux_bashrc_{os.getpid()}.rc"
                 with open(rcfile, "w", encoding="utf-8") as fh:
                     fh.write(_BASHRC)
                 os.execv("/bin/bash", ["/bin/bash", "--rcfile", rcfile, "-i"])
@@ -376,7 +392,8 @@ class TerminalManager:
     # ---------------------------- sessions ---------------------------- #
 
     def create(self, cwd: str = "", cols: int = 120, rows: int = 32,
-               label: str = "") -> TerminalSession:
+               label: str = "", argv: list[str] | None = None,
+               env: dict[str, str] | None = None) -> TerminalSession:
         self.start_reaper()
         with self._lock:
             if len(self._sessions) >= self._max:
@@ -386,7 +403,8 @@ class TerminalManager:
                 )
             self._counter += 1
             session_id = f"pty-{int(time.time())}-{self._counter}"
-            session = TerminalSession(session_id, cwd=cwd, cols=cols, rows=rows, label=label)
+            session = TerminalSession(session_id, cwd=cwd, cols=cols, rows=rows,
+                                      label=label, argv=argv, env=env)
             self._sessions[session_id] = session
             self._active = session_id
             return session

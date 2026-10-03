@@ -48,6 +48,7 @@ from agent_linux.config import (
 )
 from agent_linux.extensions import router as extensions_router
 from agent_linux.browser_api import router as browser_router
+from agent_linux.credentials import router as credentials_router
 from agent_linux.env import describe as env_describe
 from agent_linux.store import describe as store_describe
 
@@ -63,6 +64,19 @@ async def lifespan(_app: FastAPI):
     # AGENT_LINUX_TERMINAL_URL in the environment can't make the service proxy to
     # itself (or to a second copy of itself).
     terminal_link.pin(terminal_link.LocalLink())
+    # Resolve the active database account before the first request, so a
+    # deployment that has one is already using it when the console connects.
+    try:
+        from agent_linux import accounts as accounts_mod
+        from agent_linux import store as store_mod
+
+        config = await accounts_mod.store_config()
+        store_mod.set_active_account(config)
+        store_mod.reset_store()
+        if config:
+            log.info("store: using the active %s account", config.get("provider", config.get("backend")))
+    except Exception as err:                       # noqa: BLE001 — never block boot
+        log.debug("active account warm-up skipped: %s", err)
     try:
         await terminal_link.current().ensure_default()
     except Exception as err:  # never block boot on the warmup shell
@@ -100,6 +114,44 @@ TOKEN_HEADERS = ("x-nova-terminal-token", "authorization")
 # every API call it makes, so opening it leaks nothing.
 OPEN_PATHS = ("/health", "/api/health", "/", "/index.html", "/console",
               "/agent", "/agent/", "/static/console.js")
+
+
+def _ssh_report() -> dict[str, Any]:
+    """SSH availability for /health — counts only, never a key."""
+    import shutil
+
+    try:
+        from agent_linux import ssh as ssh_mod
+
+        return {
+            "available": bool(shutil.which("ssh")),
+            "keygen": bool(shutil.which("ssh-keygen")),
+            "known_hosts": str(ssh_mod.known_hosts_path()),
+        }
+    except Exception as err:                      # noqa: BLE001
+        return {"available": False, "error": f"{err.__class__.__name__}: {err}"}
+
+
+def _vault_report() -> dict[str, Any]:
+    """Whether stored credentials can be encrypted on this host."""
+    try:
+        from agent_linux import secrets as secrets_mod
+
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+            running = True
+        except RuntimeError:
+            running = False
+        if running:
+            import importlib.util
+
+            return {"available": importlib.util.find_spec("cryptography") is not None,
+                    "key_source": None}
+        return asyncio.run(secrets_mod.status())
+    except Exception as err:                      # noqa: BLE001
+        return {"available": False, "error": f"{err.__class__.__name__}: {err}"}
 
 
 def _browser_report() -> dict[str, Any]:
@@ -158,6 +210,10 @@ app.include_router(extensions_router, prefix="/agent/extensions", tags=["extensi
 # under /agent because the agent drives the *same* routes; a browser the agent
 # cannot see is a black box, and one the user cannot see is worse.
 app.include_router(browser_router, prefix="/agent/browser", tags=["browser"])
+
+# SSH and accounts — credentials. Mounted under /agent because the agent uses
+# them too (an ssh_run tool, an account_env tool), not only the console.
+app.include_router(credentials_router, prefix="/agent", tags=["credentials"])
 
 
 # --------------------------------------------------------------------------- #
@@ -222,6 +278,8 @@ async def health():
         "store": store_describe(),
         "browser": _browser_report(),
         "env": env_describe(),
+        "ssh": _ssh_report(),
+        "vault": _vault_report(),
     })
 
 

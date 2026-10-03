@@ -261,6 +261,55 @@ TOOLS: list[dict[str, Any]] = [
             }, []),
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_run",
+            "description": ("Run a command on a saved SSH host. Uses the stored key or password, "
+                            "and returns the remote output. For an interactive session the user "
+                            "opens the host as a tab instead — this is for one-off commands."),
+            "parameters": _schema({
+                "host": {"type": "string", "description": "Saved host name, e.g. `prod-web`."},
+                "command": {"type": "string", "description": "The command to run on the remote host."},
+                "timeout_s": {"type": "integer", "description": "Give up after this many seconds (default 60)."},
+            }, ["host", "command"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ssh_hosts",
+            "description": "List the saved SSH hosts and keys available on this machine.",
+            "parameters": _schema({}, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "accounts",
+            "description": ("List the saved cloud/database accounts (Postgres, Supabase, Neon, "
+                            "Cloudflare, Google, GitHub). Secrets are masked — use account_env "
+                            "to actually use one."),
+            "parameters": _schema({
+                "provider": {"type": "string", "description": "Optional: only this provider."},
+            }, []),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "account_env",
+            "description": ("Run a shell command with a saved account's credentials in its "
+                            "environment — e.g. a Cloudflare account gives the command "
+                            "CLOUDFLARE_API_TOKEN. The secret is never printed, only exported "
+                            "into that process."),
+            "parameters": _schema({
+                "provider": {"type": "string", "description": "postgres, supabase, cloudflare, google, github…"},
+                "name": {"type": "string", "description": "Account name, e.g. `work`."},
+                "command": {"type": "string", "description": "Command to run with those variables set."},
+            }, ["provider", "name", "command"]),
+        },
+    },
 ]
 
 
@@ -367,7 +416,180 @@ async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
     if name.startswith("browser_"):
         return await _browser_tool(name, args)
 
+    if name in ("ssh_run", "ssh_hosts"):
+        return await _ssh_tool(name, args)
+
+    if name in ("accounts", "account_env"):
+        return await _account_tool(name, args)
+
     return {"error": f"unknown tool: {name}"}
+
+
+# --------------------------------------------------------------------------- #
+# SSH and account tools — credentials the agent may use but never sees
+# --------------------------------------------------------------------------- #
+
+
+async def _ssh_tool(name: str, args: dict[str, Any]) -> Any:
+    """SSH from the agent's side.
+
+    Note what is *not* here: the agent can run a command on a host, but it cannot
+    read a private key or a saved password. `ssh_run` builds the same argv the
+    interactive tab would and hands the secret to that child process only, so a
+    key never reaches the model's context.
+    """
+    from . import ssh as ssh_mod
+
+    try:
+        if name == "ssh_hosts":
+            hosts = await ssh_mod.list_hosts()
+            keys = await ssh_mod.list_keys()
+            return {
+                "hosts": [ssh_mod.public_host(h) for h in hosts],
+                "keys": [{"name": k.get("name"), "fingerprint": k.get("fingerprint"),
+                          "type": k.get("type")} for k in keys],
+                "note": "secrets are stored encrypted and are never returned here",
+            }
+
+        host_name = str(args.get("host") or "").strip()
+        command = str(args.get("command") or "").strip()
+        if not host_name or not command:
+            return {"error": "host and command are required"}
+        try:
+            timeout = max(5, min(900, int(args.get("timeout_s") or 60)))
+        except (TypeError, ValueError):
+            timeout = 60
+
+        host = await ssh_mod.get_host(host_name, reveal=True)
+        if host is None:
+            known = ", ".join(h.get("name", "") for h in await ssh_mod.list_hosts()) or "none"
+            return {"error": f"no ssh host '{host_name}' (saved: {known})"}
+
+        import asyncio
+        import time as _time
+
+        from . import secrets as secrets_mod
+
+        cleanup: list[Any] = []
+        started = _time.time()
+        try:
+            key_path = await ssh_mod._materialise_key(host, cleanup)
+            argv = ssh_mod.connection_argv(
+                host, key_path,
+                ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"],
+                command,
+            )
+            environment = ssh_mod._ssh_env(host, cleanup)
+        except Exception:
+            for path in cleanup:
+                ssh_mod._shred(path)
+            raise
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=environment,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return {"error": f"the remote command did not finish within {timeout}s",
+                        "host": host_name}
+            code = proc.returncode
+        finally:
+            # The temporary key and askpass exist only for this command.
+            for path in cleanup:
+                ssh_mod._shred(path)
+
+        stdout = out.decode(errors="replace")
+        stderr = err.decode(errors="replace")
+        result: dict[str, Any] = {
+            "host": host_name,
+            "target": ssh_mod.public_host(host)["target"],
+            "exit_code": code,
+            "output": stdout[:MAX_TOOL_OUTPUT],
+            "latency_ms": int((_time.time() - started) * 1000),
+        }
+        if code != 0:
+            result["error"] = ssh_mod._explain(stderr or stdout)
+            result["stderr"] = stderr[:2000]
+        return result
+    except Exception as err:                       # noqa: BLE001
+        return {"error": f"{err.__class__.__name__}: {err}", "code": "ssh_error"}
+
+
+async def _account_tool(name: str, args: dict[str, Any]) -> Any:
+    """Accounts from the agent's side — listing is masked, use is env-only."""
+    from . import accounts as accounts_mod
+
+    try:
+        if name == "accounts":
+            provider = str(args.get("provider") or "").strip().lower()
+            docs = await accounts_mod.load_all()
+            if provider:
+                docs = [d for d in docs if d.get("provider") == provider]
+            return {
+                "accounts": [accounts_mod.public(d) for d in docs],
+                "active": {d["provider"]: d["name"] for d in docs if d.get("active")},
+                "note": "secrets are masked; use account_env to run something with one",
+            }
+
+        provider = str(args.get("provider") or "").strip().lower()
+        account = str(args.get("name") or "").strip().lower()
+        command = str(args.get("command") or "").strip()
+        if not provider or not account or not command:
+            return {"error": "provider, name and command are required"}
+
+        try:
+            values = await accounts_mod.env_for(provider, account)
+        except accounts_mod.AccountError as err:
+            return {"error": str(err)}
+
+        from .config import build_root
+
+        # Exported as an inline `env KEY=… cmd` prefix would leak the secret into
+        # the terminal's scrollback and into `ps`. Instead the values are written
+        # to a 0600 file that the command sources and deletes, so the transcript
+        # shows the command and never the credential.
+        import os
+        import stat
+        import uuid
+
+        path = build_root() / f".env-{uuid.uuid4().hex}"
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            for key, value in values.items():
+                # Single-quoted and escaped, so a value containing a quote cannot
+                # break out of the assignment and run something else.
+                safe = str(value).replace("'", "'\\''")
+                fh.write(f"export {key}='{safe}'\n")
+        try:
+            wrapped = f". {path} && {command}; __rc=$?; rm -f {path}; exit $__rc"
+            # Through the link, like every other shell-shaped tool: the command
+            # runs in a real tab the user is watching.
+            result_pair = await current().run_command(wrapped, "account", config.AGENTBOX_STEP_TIMEOUT)
+            if result_pair is None:
+                return {"error": "no terminal session is available"}
+            output, code = result_pair
+        finally:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+        result: dict[str, Any] = {
+            "provider": provider,
+            "account": account,
+            "variables": sorted(values),
+            "exit_code": code,
+            "output": (output or "")[:MAX_TOOL_OUTPUT],
+        }
+        if code != 0:
+            result["error"] = "the command exited non-zero — see output"
+        return result
+    except Exception as err:                       # noqa: BLE001
+        return {"error": f"{err.__class__.__name__}: {err}", "code": "account_error"}
 
 
 # --------------------------------------------------------------------------- #

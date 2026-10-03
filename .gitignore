@@ -23,3 +23,6 @@ build/
 *.swp
 .idea/
 .vscode/
+
+# Tooling scratch — Operit workspace backups. Never source, never tracked.
+.backup/

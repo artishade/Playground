@@ -33,9 +33,10 @@ connecting MCP servers, uploading skills and registering plugins.
 7. [Connection & configuration](#connection--configuration)
 8. [Setup](#setup)
 9. [Deploy](#deploy)
-10. [Security model](#security-model)
-11. [Troubleshooting](#troubleshooting)
-12. [Renaming from NovaRouter](#renaming-from-novarouter)
+10. [SSH & accounts](#ssh--accounts)
+11. [Security model](#security-model)
+12. [Troubleshooting](#troubleshooting)
+13. [Renaming from NovaRouter](#renaming-from-novarouter)
 
 ---
 
@@ -171,6 +172,10 @@ agent_linux/
 ├── skills.py            SKILL.md / .zip parsing and progressive disclosure
 ├── plugins.py           declarative HTTP tools + opt-in python plugins
 ├── store.py             pluggable persistence: file | supabase | postgres
+├── secrets.py           the encrypted vault (SSH keys, account credentials)
+├── ssh.py               SSH keys, known_hosts, connections, probing
+├── accounts.py          named credentials per provider, and the active one
+├── credentials.py       the /agent/ssh/* and /agent/accounts/* surface
 ├── browser.py           the shared Chromium session
 ├── browser_api.py       the browser's HTTP surface + frame stream
 ├── web/
@@ -221,6 +226,8 @@ loudly rather than silently doing nothing:
 | Browser | `browser_open`, `browser_read`, `browser_click`, `browser_type`, `browser_scroll`, `browser_eval`, `browser_screenshot` |
 | MCP | `mcp__<server>__<tool>` — every tool of every enabled server |
 | Plugins | `plugin__<name>` — one per registered plugin |
+| SSH | `ssh_run`, `ssh_hosts` — run on a saved host; list what exists |
+| Accounts | `accounts`, `account_env` — list (masked); run with one active |
 
 **Providers** are OpenAI-compatible endpoints, from two sources: the environment
 (`id: env`, cannot be deleted) and `POST /agent/providers` (persisted, keys
@@ -395,6 +402,7 @@ AGENT_LINUX_AGENTBOX_STEP_TIMEOUT=120   # seconds per tool call
 | `AGENT_LINUX_STORE_READONLY` | `0` | Make the `sql` tool SELECT-only. |
 | `AGENT_LINUX_MCP_SERVERS` | *(empty)* | JSON array of MCP servers baked in at deploy. |
 | `AGENT_LINUX_PLUGINS_ALLOW_CODE` | `0` | Allow python plugins (same trust as the shell). |
+| `AGENT_LINUX_SECRET_KEY` | *(empty)* | Vault key for stored SSH keys and account credentials. Unset = a 0600 key file beside the workspace. |
 
 **Legacy names still work.** `NOVA_TERMINAL_TOKEN`, `NOVA_TERMINAL_PORT`,
 `NOVA_BUILD_ROOT`, `NOVA_AGENTBOX_*`, `NOVA_STORE_*` and the rest are read with a
@@ -548,6 +556,138 @@ and only the browser is unavailable.
 
 ---
 
+## SSH & accounts
+
+Two features that are really one problem: credentials. Both store secrets
+**encrypted**, and both obey the same rule — a mask goes out over the API, the
+plaintext stays inside the process that needs it.
+
+### SSH — connect to remote hosts from the terminal
+
+An SSH session here is **a real terminal tab running `ssh`**. `pty.py` can exec an
+arbitrary `argv` on its PTY, so there is no proxied subprocess and no bespoke UI:
+host-key prompts, password prompts, `~/.ssh/config` aliases, port forwarding and
+`scp` all work, because it is the actual `ssh` client.
+
+```bash
+T="X-Nova-Terminal-Token: $TOKEN"
+B=localhost:3100
+
+# 1. Generate a keypair on this host (ed25519). The private half goes to the vault.
+curl -s -H "$T" -H 'content-type: application/json' \
+  -d '{"name":"prod","comment":"deploy@agent-linux"}' \
+  $B/agent/ssh/keys
+
+# 2. Adopt a key you already have (public half is derived if you omit it).
+curl -s -H "$T" -H 'content-type: application/json' \
+  -d '{"name":"legacy","private_key":"-----BEGIN OPENSSH PRIVATE KEY-----\n…"}' \
+  $B/agent/ssh/keys/import
+
+# 3. Save a connection.
+curl -s -H "$T" -H 'content-type: application/json' \
+  -d '{"name":"web1","hostname":"10.0.0.5","user":"deploy","port":22,
+       "auth":"key","key":"prod"}' \
+  $B/agent/ssh/hosts
+
+# 4. Does the key actually authenticate? No tab opened, no prompt.
+curl -s -XPOST -H "$T" $B/agent/ssh/hosts/web1/probe
+
+# 5. Open it. This creates a real terminal tab you can type into.
+curl -s -XPOST -H "$T" $B/agent/ssh/hosts/web1/open
+```
+
+What is deliberately **not** here: the agent can run a command on a host, but it
+cannot read a private key or a saved password. `ssh_run` builds the same argv the
+interactive tab would and hands the secret to that child process only.
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /agent/ssh` | keys, hosts, availability, vault status |
+| `GET /agent/ssh/keys` | list — **public halves only** |
+| `POST /agent/ssh/keys` | generate a keypair on this host |
+| `POST /agent/ssh/keys/import` | adopt an existing private key |
+| `GET /agent/ssh/keys/{name}/private` | reveal it, deliberately and audibly |
+| `GET POST DELETE /agent/ssh/hosts[/{name}]` | saved connections |
+| `POST /agent/ssh/hosts/{name}/open` | open a real ssh tab |
+| `POST /agent/ssh/hosts/{name}/probe` | non-interactive auth check |
+| `GET /agent/ssh/known_hosts` · `DELETE` | what is trusted, and forgetting it |
+
+**Host keys are real.** `StrictHostKeyChecking=accept-new` is the honest middle
+ground: an unknown host is accepted and *recorded* the first time, a *changed*
+key is refused loudly. `no` would be silent MITM; `yes` would make a fresh host
+unusable without a manual step the console cannot perform. `known_hosts` lives in
+`&lt;workspace&gt;/.agent_linux-ssh/` and survives restarts.
+
+**Key material never lingers.** A key is written to a 0600 file only for the
+moment a connection needs it, and removed when that connection ends — including
+when a tab closes. Passwords are supported but never preferred: a saved password
+becomes a 0700 askpass script for the duration of the connection, then is deleted,
+so it never appears in an argv or a process listing.
+
+### Accounts — many credentials per provider
+
+The problem this solves is mundane and real: a personal and a work Supabase
+project, two Cloudflare accounts, three Google service accounts, a Neon branch
+database per environment. One global `AGENT_LINUX_STORE_URL` cannot express that,
+and pasting a DSN into a shell command is how credentials end up in a history file.
+
+Accounts are **named documents grouped by provider**:
+
+| Provider | Fields |
+| --- | --- |
+| `postgres` | `url` (DSN) · `sslmode` |
+| `neon` | `url` · `branch` |
+| `supabase` | `project_url` · `service_key` · `anon_key` · `db_url` |
+| `cloudflare` | `account_id` · `api_token` · `zone_id` · `r2_bucket` |
+| `google` | `service_account_json` · `project_id` · `bucket` · `region` |
+| `github` | `token` · `owner` |
+| `generic` | any key/value pair |
+
+```bash
+# Add two Cloudflare accounts side by side.
+curl -s -H "$T" -H 'content-type: application/json' \
+  -d '{"provider":"cloudflare","name":"work",
+       "account_id":"…","api_token":"…"}' $B/agent/accounts
+
+curl -s -H "$T" -H 'content-type: application/json' \
+  -d '{"provider":"cloudflare","name":"personal",
+       "account_id":"…","api_token":"…"}' $B/agent/accounts
+
+# Make one active (only one per provider).
+curl -s -XPOST -H "$T" $B/agent/accounts/cloudflare/work/activate
+
+# What variables does it export? Masked by default.
+curl -s -H "$T" $B/agent/accounts/cloudflare/work/env
+```
+
+**Activating a database account is a real switch.** With a `postgres`, `neon` or
+`supabase` account active, the store is rebuilt from that account's DSN — so the
+agent's `sql` tool moves to that database immediately, with no restart and no
+edited environment. Deactivating it falls back to the environment, then to `file`.
+
+**Secrets are exported, never printed.** A command runs with an account's
+credentials in its environment via a 0600 file that it sources and deletes — not
+an inline `env KEY=… cmd`, which would leak into the terminal's scrollback and
+into `ps`.
+
+### The vault
+
+Both features store through `secrets.py`, which encrypts by field name
+(`…_token`, `…_key`, `…_url` are secret) using Fernet.
+
+| Setting | Behaviour |
+| --- | --- |
+| `AGENT_LINUX_SECRET_KEY` set | Used directly — a Fernet key, or any passphrase (derived with SHA-256). **Do this in production.** |
+| unset | A key is generated on first use at `<workspace>/.agent_linux_vault.key`, 0600, and a loud warning is logged. It protects against a database dump, **not** against someone with the disk. |
+| `cryptography` missing | Every credential route answers `vault_unavailable` with the install command; nothing else is affected. |
+
+A secret is only ever decrypted for the code that *uses* it. `public()` masks
+every secret field rather than dropping it, so the console can show *that* a
+token is set without showing which.
+
+
+---
+
 ## Security model
 
 **This service hands out root shells. Treat the token as you would an SSH key.**
@@ -588,6 +728,11 @@ and only the browser is unavailable.
 | Shell routes `404` | You are on a host that mounted the routes elsewhere. This build serves them at `/terminal/pty/*`; `GET /health` confirms the service is the one answering. |
 | `sql` says "the file store has no SQL" | Expected. Point `AGENT_LINUX_STORE_BACKEND=postgres` at a DSN to get it. |
 | A skill upload is rejected | Needs a `name` — either frontmatter `name:` or a filename that is a valid id (`[a-z0-9._-]`). |
+| `vault_unavailable` | `pip install cryptography`. Stored credentials need it; nothing else does. |
+| `cannot decrypt with the current vault key` | `AGENT_LINUX_SECRET_KEY` changed, or the vault key file was lost. The stored secret must be re-entered. |
+| `ssh: Could not resolve hostname` on a saved host | The hostname is wrong. This build already puts the destination before any remote command, which is the other cause. |
+| `host key verification failed` | The server was rebuilt. `DELETE /agent/ssh/known_hosts` with the hostname, then reconnect — but check first, because a changed key is also what a MITM looks like. |
+| Activating a DB account does nothing | Check `/agent/extensions/db` for the reason: usually the DSN is unreachable, or `asyncpg` is missing for a postgres account. |
 | MCP server `test` times out | stdio servers get 25 s to answer. First run of `npx -y …` downloads the package; retry once it is cached. |
 
 ---
