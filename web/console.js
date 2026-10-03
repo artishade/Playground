@@ -1281,15 +1281,483 @@
     }
   }
 
-  function showPane(name) {
-    const panel = $('extPanel');
+  // ---------------------------------------------------------------------------
+  // Credentials — SSH keys, remote hosts and provider accounts.
+  //
+  // A second drawer, same furniture as extensions (`/agent/ssh*`,
+  // `/agent/accounts*`). The host never returns a private key, a password or a
+  // token unless a route is called to reveal it, so this client is written to
+  // match: masked values are shown as masked, and blank secret fields on an
+  // update mean "keep the stored one" — exactly what the API does.
+  // ---------------------------------------------------------------------------
+
+  const CRED = '/agent';
+
+  const cred = {
+    loaded: false,
+    keys: [],
+    hosts: [],
+    known: [],
+    accounts: [],
+    catalogue: [],
+    providers: {},
+    ssh: null,
+    vault: null,
+  };
+
+  function mkOption(value, label) {
+    const node = document.createElement('option');
+    node.value = value;
+    node.textContent = label;
+    return node;
+  }
+
+  async function copyText(text, okMessage) {
+    if (!text) { toast('nothing to copy', 'err'); return; }
+    try {
+      if (global.navigator && global.navigator.clipboard) {
+        await global.navigator.clipboard.writeText(text);
+        toast(okMessage || 'copied', 'ok');
+        return;
+      }
+    } catch (err) { /* clipboard blocked — fall through to the log */ }
+    toast('clipboard blocked — the value is in the console log', 'err');
+    if (global.console) global.console.log(text);
+  }
+
+  async function loadCredentials(force) {
+    if (cred.loaded && !force) return;
+    try {
+      const [ov, keys, hosts, kh, accts, prov] = await Promise.all([
+        json(`${CRED}/ssh`),
+        json(`${CRED}/ssh/keys`),
+        json(`${CRED}/ssh/hosts`),
+        json(`${CRED}/ssh/known_hosts`),
+        json(`${CRED}/accounts`),
+        json(`${CRED}/accounts/providers`),
+      ]);
+      cred.ssh = (ov.body && ov.body.ssh) || {};
+      cred.vault = (ov.body && ov.body.vault) || null;
+      cred.keys = (keys.body && keys.body.keys) || [];
+      cred.hosts = (hosts.body && hosts.body.hosts) || [];
+      cred.known = (kh.body && kh.body.entries) || [];
+      cred.accounts = (accts.body && accts.body.accounts) || [];
+      if (accts.body && accts.body.vault) cred.vault = accts.body.vault;
+      cred.catalogue = (prov.body && prov.body.providers) || [];
+      cred.loaded = true;
+    } catch (err) {
+      toast('cannot reach the credentials API', 'err');
+      return;
+    }
+    renderCredBadge();
+    renderSshStatus();
+    renderKeys();
+    renderHosts();
+    renderKnownHosts();
+    buildProviderSelect();
+    renderAccounts();
+  }
+
+  function renderCredBadge() {
+    const badge = $('credCount');
+    if (badge) {
+      badge.textContent = String(cred.keys.length + cred.hosts.length + cred.accounts.length);
+    }
+    const dot = $('credDot');
+    if (dot) dot.classList.toggle('bad', !cred.ssh || cred.ssh.available === false);
+    const vaultText = $('vaultText');
+    if (vaultText) {
+      const v = cred.vault || {};
+      vaultText.textContent = 'vault: ' + (v.available ? (v.key_source || 'ready') : 'unavailable');
+    }
+  }
+
+  function renderSshStatus() {
+    const box = $('sshStat');
+    if (!box) return;
+    const s = cred.ssh || {};
+    box.textContent = [
+      s.available ? 'ssh present' : 'ssh MISSING on this host',
+      s.keygen ? 'ssh-keygen present' : 'ssh-keygen missing',
+      `${s.keys || 0} keys · ${s.hosts || 0} hosts`,
+    ].join(' · ');
+    box.className = s.available ? 'hint' : 'bad-line';
+  }
+
+  // ---- SSH keys ------------------------------------------------------------
+
+  function renderKeys() {
+    const box = $('keyList');
+    if (!box) return;
+    box.textContent = '';
+    if (!cred.keys.length) {
+      box.append(el('div', 'meta', 'no keys yet — generate one below, or import a private key you already have.'));
+    } else {
+      cred.keys.forEach((key) => {
+        const tags = [
+          el('span', 'tagx', key.type || 'key'),
+          el('span', 'tagx' + (key.has_private ? ' acc' : ''), key.has_private ? 'private in vault' : 'public only'),
+        ];
+        const acts = [
+          btn('copy public', () => copyText(key.public_key || '', 'public key copied')),
+          btn('reveal private', () => revealKey(key.name), 'primary'),
+          btn('delete', () => deleteKey(key.name)),
+        ];
+        const meta = `${key.fingerprint || 'no fingerprint'}${key.comment ? ' · ' + key.comment : ''}`;
+        box.append(itemCard(key.name, key.has_private, meta, tags, acts));
+      });
+    }
+  }
+
+  async function saveKey(form) {
+    const payload = {
+      name: $('k_name').value.trim(),
+      type: $('k_type').value,
+      comment: $('k_comment').value.trim(),
+    };
+    if (!payload.name) { toast('a key needs a name', 'err'); return; }
+    const { status, body } = await json(`${CRED}/ssh/keys`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast((body && body.error) || 'key generation failed', 'err'); return; }
+    form.reset();
+    toast(`key "${payload.name}" generated`, 'ok');
+    await loadCredentials(true);
+  }
+
+  async function importKey(form) {
+    const payload = {
+      name: $('k_import_name').value.trim(),
+      private_key: $('k_import_private').value,
+      public_key: $('k_import_public').value.trim(),
+    };
+    if (!payload.name || !payload.private_key.trim()) {
+      toast('a name and a private key are required', 'err');
+      return;
+    }
+    const { status, body } = await json(`${CRED}/ssh/keys/import`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast((body && body.error) || 'import failed', 'err'); return; }
+    form.reset();
+    toast(`key "${payload.name}" imported`, 'ok');
+    await loadCredentials(true);
+  }
+
+  async function revealKey(name) {
+    if (global.confirm && !global.confirm(
+      `Reveal the private key "${name}"?\n\nIt will be copied to the clipboard and logged by the host as a deliberate action.`)) return;
+    const { status, body } = await json(`${CRED}/ssh/keys/${encodeURIComponent(name)}/private`);
+    if (status !== 200 || !body.key) { toast((body && body.error) || 'cannot reveal the key', 'err'); return; }
+    await copyText(body.key.private_key || '', 'private key copied to the clipboard');
+  }
+
+  async function deleteKey(name) {
+    if (global.confirm && !global.confirm(
+      `Delete the key "${name}"? Every host using it stops authenticating.`)) return;
+    const { status, body } = await json(`${CRED}/ssh/keys/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (status !== 200) { toast((body && body.error) || 'delete failed', 'err'); return; }
+    toast(`key "${name}" deleted`, 'ok');
+    await loadCredentials(true);
+  }
+
+  // ---- remote hosts --------------------------------------------------------
+
+  function renderHosts() {
+    const box = $('hostList');
+    if (!box) return;
+    box.textContent = '';
+    if (!cred.hosts.length) {
+      box.append(el('div', 'meta', 'no saved hosts yet — add one below and open it as a shell tab.'));
+    } else {
+      cred.hosts.forEach((host) => {
+        const tags = [
+          el('span', 'tagx', host.auth || 'key'),
+          el('span', 'tagx', ':' + host.port),
+        ];
+        if (host.key) tags.push(el('span', 'tagx acc', host.key));
+        if (host.has_password) tags.push(el('span', 'tagx acc', 'password set'));
+        const acts = [
+          btn('open shell', () => openHost(host.name), 'primary'),
+          btn('probe', () => probeHost(host.name)),
+          btn('fill form', () => fillHostForm(host)),
+          btn('delete', () => deleteHost(host.name)),
+        ];
+        const meta = `${host.target}${host.notes ? ' · ' + host.notes : ''}`;
+        box.append(itemCard(host.label || host.name, true, meta, tags, acts));
+      });
+    }
+    // Keep the "key to use" picker in step with the key list.
+    const pick = $('h_key');
+    if (pick) {
+      const current = pick.value;
+      pick.textContent = '';
+      pick.append(mkOption('', '— key (none) —'));
+      cred.keys.forEach((k) => pick.append(mkOption(k.name, k.name)));
+      pick.value = current;
+    }
+  }
+
+  function fillHostForm(host) {
+    $('h_name').value = host.name || '';
+    $('h_label').value = host.label || '';
+    $('h_hostname').value = host.hostname || '';
+    $('h_user').value = host.user || 'root';
+    $('h_port').value = host.port || 22;
+    $('h_auth').value = host.auth || 'key';
+    $('h_key').value = host.key || '';
+    $('h_profile').value = host.profile || '';
+    $('h_notes').value = host.notes || '';
+    $('h_password').value = '';           // blank on an update keeps the stored one
+    showCredPane('sshhosts');
+    toast(`form filled from "${host.name}"`, 'ok');
+  }
+
+  async function saveHostForm(form) {
+    const payload = {
+      name: $('h_name').value.trim(),
+      label: $('h_label').value.trim(),
+      hostname: $('h_hostname').value.trim(),
+      user: $('h_user').value.trim() || 'root',
+      port: Number($('h_port').value || 22),
+      auth: $('h_auth').value,
+      key: $('h_key').value,
+      profile: $('h_profile').value.trim(),
+      password: $('h_password').value,
+      notes: $('h_notes').value.trim(),
+    };
+    if (!payload.name || !payload.hostname) {
+      toast('a host needs a name and a hostname', 'err');
+      return;
+    }
+    const { status, body } = await json(`${CRED}/ssh/hosts`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast((body && body.error) || 'save failed', 'err'); return; }
+    form.reset();
+    $('h_user').value = 'root';
+    $('h_port').value = '22';
+    toast(`host "${payload.name}" saved`, 'ok');
+    await loadCredentials(true);
+  }
+
+  async function openHost(name) {
+    const { status, body } = await json(
+      `${CRED}/ssh/hosts/${encodeURIComponent(name)}/open`, { method: 'POST', body: '{}' });
+    if (status !== 200) { toast((body && body.error) || 'cannot open the host', 'err'); return; }
+    toast(`opening ${body.label || name}…`, 'ok');
+    const panel = $('credPanel');
+    if (panel) panel.hidden = true;       // the ssh tab is a normal terminal session
+    await loadSessions();
+    if (body.session) select(body.session);
+  }
+
+  async function probeHost(name) {
+    toast(`probing ${name}…`);
+    const { status, body } = await json(
+      `${CRED}/ssh/hosts/${encodeURIComponent(name)}/probe`, { method: 'POST', body: '{}' });
+    if (status !== 200) { toast((body && body.error) || 'probe failed', 'err'); return; }
+    if (body.ok) toast(`${name}: ok in ${body.latency_ms}ms`, 'ok');
+    else toast(`${name}: ${body.error || 'no answer'}`, 'err');
+  }
+
+  async function deleteHost(name) {
+    if (global.confirm && !global.confirm(
+      `Delete the host "${name}"? The saved credentials go with it.`)) return;
+    const { status, body } = await json(`${CRED}/ssh/hosts/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (status !== 200) { toast((body && body.error) || 'delete failed', 'err'); return; }
+    toast(`host "${name}" deleted`, 'ok');
+    await loadCredentials(true);
+  }
+
+  // ---- known hosts ---------------------------------------------------------
+
+  function renderKnownHosts() {
+    const pathBox = $('khPath');
+    if (pathBox) {
+      pathBox.textContent = cred.known.length
+        ? `${cred.known.length} entries in the trust file`
+        : 'nothing trusted yet — the first ssh connection adds an entry';
+    }
+    const box = $('khList');
+    if (!box) return;
+    box.textContent = '';
+    if (!cred.known.length) {
+      box.append(el('div', 'meta', 'known_hosts is empty.'));
+      return;
+    }
+    cred.known.forEach((entry) => {
+      const acts = [btn('forget', () => forgetHost(entry.hosts), 'primary')];
+      box.append(itemCard(entry.hosts, true, `${entry.type} · ${entry.key}`, [], acts));
+    });
+  }
+
+  async function forgetHost(hostname) {
+    if (global.confirm && !global.confirm(
+      `Forget the host key for "${hostname}"? The next connection trusts it again from scratch.`)) return;
+    const { status, body } = await json(
+      `${CRED}/ssh/known_hosts`, { method: 'DELETE', body: JSON.stringify({ hostname }) });
+    if (status !== 200) { toast((body && body.error) || 'forget failed', 'err'); return; }
+    toast(`forgot ${hostname} (${body.forgotten || 0} removed)`, 'ok');
+    await loadCredentials(true);
+  }
+
+  // ---- accounts ------------------------------------------------------------
+
+  function buildProviderSelect() {
+    const pick = $('a_provider');
+    if (!pick) return;
+    const current = pick.value;
+    pick.textContent = '';
+    cred.providers = {};
+    cred.catalogue.forEach((spec) => {
+      cred.providers[spec.id] = spec;
+      pick.append(mkOption(spec.id, spec.label || spec.id));
+    });
+    if (current && cred.providers[current]) pick.value = current;
+    renderAccountFields();
+  }
+
+  function renderAccountFields(preset) {
+    const host = $('aFields');
+    if (!host) return;
+    const spec = cred.providers[$('a_provider').value];
+    host.textContent = '';
+    if (!spec) return;
+    spec.fields.forEach((field) => {
+      const input = document.createElement('input');
+      input.id = 'af_' + field.name;
+      input.dataset.field = field.name;
+      if (field.secret) input.type = 'password';
+      input.setAttribute('aria-label', field.name);
+      const required = field.required ? ' (required)' : '';
+      input.placeholder = `${field.name}${required} — ${field.hint || ''}`;
+      const stored = preset && preset[field.name] != null && preset[field.name] !== '';
+      if (stored && field.secret) {
+        // A masked secret must never be sent back: the API reads a blank secret
+        // as "keep the stored one", so the field stays empty on purpose.
+        input.placeholder = `${field.name} (set — blank keeps it)`;
+      } else if (stored) {
+        input.value = preset[field.name];
+      }
+      host.append(input);
+    });
+    const note = el('span', 'hint', spec.note || '');
+    note.style.padding = '0';
+    host.append(note);
+  }
+
+  function renderAccounts() {
+    const box = $('acctList');
+    if (!box) return;
+    box.textContent = '';
+    if (!cred.accounts.length) {
+      box.append(el('div', 'meta', 'no accounts yet — the store keeps using the environment until one is active.'));
+      return;
+    }
+    cred.accounts.forEach((acct) => {
+      const tags = [];
+      if (acct.active) tags.push(el('span', 'tagx acc', 'active'));
+      (acct.secret_fields || []).forEach((field) => {
+        if (acct.fields && acct.fields[field]) tags.push(el('span', 'tagx acc', field + ' set'));
+      });
+      const acts = [
+        btn(acct.active ? 'deactivate' : 'activate', () => activateAccount(acct), acct.active ? '' : 'primary'),
+        btn('env', () => showEnv(acct)),
+        btn('fill form', () => fillAccountForm(acct)),
+        btn('delete', () => deleteAccount(acct)),
+      ];
+      const meta = `${acct.provider}${acct.notes ? ' · ' + acct.notes : ''}`;
+      box.append(itemCard(acct.label || acct.name, true, meta, tags, acts));
+    });
+  }
+
+  function fillAccountForm(acct) {
+    $('a_provider').value = acct.provider;
+    renderAccountFields(acct.fields || {});
+    $('a_name').value = acct.name || '';
+    $('a_label').value = acct.label || '';
+    $('a_active').checked = !!acct.active;
+    $('a_notes').value = acct.notes || '';
+    showCredPane('accounts');
+    toast('secrets stay masked — leave a secret field blank to keep the stored value', 'ok');
+  }
+
+  async function saveAccount(form) {
+    const provider = $('a_provider').value;
+    const name = $('a_name').value.trim().toLowerCase();
+    if (!provider || !name) { toast('pick a provider and name the account', 'err'); return; }
+    const fields = {};
+    document.querySelectorAll('#aFields input[data-field]').forEach((input) => {
+      const value = input.value.trim();
+      if (value) fields[input.dataset.field] = value;   // blank ⇒ keep stored
+    });
+    const payload = {
+      provider,
+      name,
+      label: $('a_label').value.trim(),
+      notes: $('a_notes').value.trim(),
+      active: $('a_active').checked,
+      fields,
+    };
+    const { status, body } = await json(`${CRED}/accounts`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast((body && body.error) || 'save failed', 'err'); return; }
+    form.reset();
+    renderAccountFields();
+    toast(`account ${provider}/${name} saved`, 'ok');
+    await loadCredentials(true);
+  }
+
+  async function activateAccount(acct) {
+    const next = !acct.active;
+    const url = `${CRED}/accounts/${encodeURIComponent(acct.provider)}/${encodeURIComponent(acct.name)}/activate`;
+    const { status, body } = await json(url, { method: 'POST', body: JSON.stringify({ active: next }) });
+    if (status !== 200) { toast((body && body.error) || 'cannot switch the account', 'err'); return; }
+    if (body.store_backend) toast(`${acct.provider}/${acct.name} active — the store is now ${body.store_backend}`, 'ok');
+    else toast(`${acct.provider}/${acct.name} ${next ? 'active' : 'inactive'}`, 'ok');
+    await loadCredentials(true);
+  }
+
+  async function showEnv(acct) {
+    const url = `${CRED}/accounts/${encodeURIComponent(acct.provider)}/${encodeURIComponent(acct.name)}/env`;
+    const { status, body } = await json(url);
+    if (status !== 200) { toast((body && body.error) || 'cannot read the environment', 'err'); return; }
+    const names = Object.keys(body.variables || {});
+    if (!names.length) { toast('this account exports nothing yet', 'err'); return; }
+    if (global.console) global.console.log(`[${acct.provider}/${acct.name}]`, body.variables);
+    toast(`${names.join(', ')} — values (masked) in the console log`, 'ok');
+  }
+
+  async function deleteAccount(acct) {
+    if (global.confirm && !global.confirm(
+      `Delete ${acct.provider}/${acct.name}? The stored credentials go with it.`)) return;
+    const url = `${CRED}/accounts/${encodeURIComponent(acct.provider)}/${encodeURIComponent(acct.name)}`;
+    const { status, body } = await json(url, { method: 'DELETE' });
+    if (status !== 200) { toast((body && body.error) || 'delete failed', 'err'); return; }
+    toast(`${acct.provider}/${acct.name} deleted`, 'ok');
+    await loadCredentials(true);
+  }
+
+  function showCredPane(name) {
+    const panel = $('credPanel');
     if (panel) panel.hidden = false;
-    document.querySelectorAll('.exttab').forEach((tab) => {
+    const scope = panel || document;
+    scope.querySelectorAll('.exttab').forEach((tab) => {
       const active = tab.dataset.pane === name;
       tab.classList.toggle('active', active);
       tab.setAttribute('aria-selected', String(active));
     });
-    document.querySelectorAll('.extpane').forEach((pane) => {
+    scope.querySelectorAll('.extpane').forEach((pane) => {
+      pane.classList.toggle('active', pane.id === 'pane-' + name);
+    });
+  }
+
+  function showPane(name) {
+    const panel = $('extPanel');
+    if (panel) panel.hidden = false;
+    // Scoped to this drawer: the credentials drawer reuses .exttab/.extpane for
+    // the same look, and an unscoped querySelectorAll would deactivate its tabs.
+    const scope = panel || document;
+    scope.querySelectorAll('.exttab').forEach((tab) => {
+      const active = tab.dataset.pane === name;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+    scope.querySelectorAll('.extpane').forEach((pane) => {
       pane.classList.toggle('active', pane.id === 'pane-' + name);
     });
   }
@@ -1398,6 +1866,27 @@
       });
     }
 
+    // ---- credentials drawer -----------------------------------------------
+    const credPanel = $('credPanel');
+    on($('cred'), 'click', () => {
+      if (!credPanel) return;
+      credPanel.hidden = !credPanel.hidden;
+      if (!credPanel.hidden) loadCredentials();
+    });
+    on($('credClose'), 'click', () => { if (credPanel) credPanel.hidden = true; });
+    // Scoped on purpose — an unscoped `.exttab` selector would also hit the
+    // extensions drawer's tabs and switch both drawers at once.
+    if (credPanel) {
+      credPanel.querySelectorAll('.exttab').forEach((tab) => {
+        on(tab, 'click', () => showCredPane(tab.dataset.pane));
+      });
+    }
+    on($('keyForm'), 'submit', (e) => { e.preventDefault(); saveKey(e.target); });
+    on($('keyImportForm'), 'submit', (e) => { e.preventDefault(); importKey(e.target); });
+    on($('hostForm'), 'submit', (e) => { e.preventDefault(); saveHostForm(e.target); });
+    on($('acctForm'), 'submit', (e) => { e.preventDefault(); saveAccount(e.target); });
+    on($('a_provider'), 'change', () => renderAccountFields());
+
     // Shortcuts — Alt+… never collides with a shell running in the xterm.
     on(global, 'keydown', (e) => {
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
@@ -1408,6 +1897,12 @@
       else if (key === 't') { e.preventDefault(); newSession(); }
       else if (key === 'b') { e.preventDefault(); showView(browser.view === 'browser' ? 'shell' : 'browser'); }
       else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('agent-open'); }
+      else if (key === 'c') {
+        e.preventDefault();
+        if (!credPanel) return;
+        credPanel.hidden = !credPanel.hidden;
+        if (!credPanel.hidden) loadCredentials();
+      }
       else if (key === '1' || key === '2' || key === '3' || key === '4' || key === '5' || key === '6' || key === '7' || key === '8') {
         const idx = Number(key) - 1;
         const live = state.sessions.filter((s) => !s.closed);
@@ -1443,6 +1938,7 @@
     loadProviders, renderProviders, saveProvider, ask, boot, say,
     ext, loadExtensions, loadMcp, loadSkills, loadPlugins, loadDb, loadCatalogue,
     showPane, uploadSkillFile, runDbQuery,
+    cred, loadCredentials, showCredPane,
     browser, showView, browserState, browserStart, browserStop, browserGo, browserAction,
   };
 

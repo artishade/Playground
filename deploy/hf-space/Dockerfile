@@ -42,4 +42,4 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 7860
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python3", "-m", "terminal.service"]
+CMD ["python3", "-m", "agent_linux.service"]

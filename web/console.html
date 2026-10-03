@@ -457,6 +457,8 @@ pre.out {
     </select>
     <button id="ext" type="button" class="icon" title="extensions — MCP, skills, plugins, database"
             aria-label="extensions">⧉ <span id="extCount" class="hide-sm">0</span></button>
+    <button id="cred" type="button" class="icon" title="credentials — SSH keys, remote hosts, provider accounts"
+            aria-label="credentials">⚿ <span id="credCount" class="hide-sm">0</span></button>
     <button id="new" type="button" class="primary">+ shell</button>
     <button id="clear" type="button" class="icon" aria-label="clear the view" title="clear view (Alt+K)">clear</button>
     <button id="paneToggle" type="button" class="icon" aria-label="toggle agent pane" title="agent pane">agent</button>
@@ -678,6 +680,123 @@ NOVA_STORE_READONLY=1        # optional: sql tool becomes SELECT-only</pre>
     <section class="extpane" id="pane-catalogue" role="tabpanel">
       <p class="lead">Copy-paste starting points. Each button fills the matching form.</p>
       <div id="catalogue" class="cards"></div>
+    </section>
+  </div>
+</div>
+
+<!-- =================================================== credentials drawer -->
+<div id="credPanel" class="drawer" hidden aria-label="SSH and accounts">
+  <div class="drawer-head">
+    <span class="pill"><span class="dot" id="credDot"></span><b>SSH &amp; ACCOUNTS</b></span>
+    <span class="grow"></span>
+    <span class="pill" id="vaultPill" title="where credentials are encrypted and kept">
+      <span id="vaultText">vault: —</span>
+    </span>
+    <button id="credClose" type="button" class="icon" aria-label="close credentials">×</button>
+  </div>
+
+  <nav class="tabs" id="credTabs" role="tablist" aria-label="credential sections">
+    <button type="button" class="exttab active" data-pane="sshkeys" role="tab" aria-selected="true">SSH keys</button>
+    <button type="button" class="exttab" data-pane="sshhosts" role="tab" aria-selected="false">Remote hosts</button>
+    <button type="button" class="exttab" data-pane="knownhosts" role="tab" aria-selected="false">Known hosts</button>
+    <button type="button" class="exttab" data-pane="accounts" role="tab" aria-selected="false">Accounts</button>
+  </nav>
+
+  <div class="drawer-body">
+    <!-- ------------------------------------------------------- SSH keys -->
+    <section class="extpane active" id="pane-sshkeys" role="tabpanel">
+      <p class="lead">Keypairs this host can authenticate with. The private half is written
+        straight into the encrypted vault — no route ever returns it unless you press
+        <b>reveal</b> on purpose.</p>
+      <div id="sshStat" class="hint" style="padding:0 0 12px"></div>
+      <div id="keyList" class="cards"></div>
+      <form id="keyForm" class="stack card">
+        <b>generate a keypair</b>
+        <div class="row2">
+          <input id="k_name" placeholder="name — github-deploy" aria-label="key name" required>
+          <select id="k_type" aria-label="key type">
+            <option value="ed25519">ed25519</option>
+            <option value="rsa">rsa</option>
+            <option value="ecdsa">ecdsa</option>
+          </select>
+        </div>
+        <input id="k_comment" placeholder="comment — you@laptop (optional)" aria-label="key comment">
+        <button type="submit" class="primary">generate</button>
+      </form>
+      <form id="keyImportForm" class="stack card">
+        <b>or import an existing key</b>
+        <input id="k_import_name" placeholder="name — work-laptop" aria-label="imported key name" required>
+        <textarea id="k_import_private" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----…" aria-label="private key"></textarea>
+        <input id="k_import_public" placeholder="public key — optional, derived if blank" aria-label="public key">
+        <button type="submit" class="primary">import</button>
+      </form>
+    </section>
+
+    <!-- ---------------------------------------------------- Remote hosts -->
+    <section class="extpane" id="pane-sshhosts" role="tabpanel">
+      <p class="lead">Saved connections. <b>open</b> drops a real <code>ssh</code> tab into the
+        terminal — type in it like any other shell. <b>probe</b> only checks whether the
+        key or password actually authenticates.</p>
+      <div id="hostList" class="cards"></div>
+      <form id="hostForm" class="stack card">
+        <b>add or update a host</b>
+        <div class="row2">
+          <input id="h_name" placeholder="name — prod-box" aria-label="host name" required>
+          <input id="h_label" placeholder="label — Production (optional)" aria-label="host label">
+        </div>
+        <div class="row2">
+          <input id="h_hostname" placeholder="hostname — 203.0.113.10 or box.example.com" aria-label="hostname" required>
+          <input id="h_user" placeholder="user — root" aria-label="ssh user" value="root">
+        </div>
+        <div class="row2">
+          <input id="h_port" placeholder="port — 22" aria-label="port" value="22">
+          <select id="h_auth" aria-label="auth method">
+            <option value="key">key</option>
+            <option value="password">password</option>
+            <option value="agent">ssh agent</option>
+          </select>
+        </div>
+        <div class="row2">
+          <select id="h_key" aria-label="key to use"><option value="">— key (none) —</option></select>
+          <input id="h_profile" placeholder="profile — optional (~/.ssh/config stanza)" aria-label="profile">
+        </div>
+        <input id="h_password" type="password" placeholder="password — blank keeps the stored one" aria-label="password">
+        <input id="h_notes" placeholder="notes — optional" aria-label="notes">
+        <button type="submit" class="primary">save host</button>
+      </form>
+    </section>
+
+    <!-- ----------------------------------------------------- Known hosts -->
+    <section class="extpane" id="pane-knownhosts" role="tabpanel">
+      <p class="lead">The fingerprints this host has been told to trust. After a remote
+        rebuild the old entry is stale and every connection fails with a host-key
+        warning — forget it here, deliberately, instead of with
+        <code>-o StrictHostKeyChecking=no</code>.</p>
+      <div id="khPath" class="hint" style="padding:0 0 12px"></div>
+      <div id="khList" class="cards"></div>
+    </section>
+
+    <!-- -------------------------------------------------------- Accounts -->
+    <section class="extpane" id="pane-accounts" role="tabpanel">
+      <p class="lead">Named credentials per provider — a personal and a work Supabase, a
+        Neon branch per environment, several Cloudflare tokens. Activating a
+        <b>postgres</b>, <b>neon</b> or <b>supabase</b> account switches the database the
+        agent's <code>sql</code> tool talks to, immediately.</p>
+      <div id="acctList" class="cards"></div>
+      <form id="acctForm" class="stack card">
+        <b>add or update an account</b>
+        <div class="row2">
+          <select id="a_provider" aria-label="provider"></select>
+          <input id="a_name" placeholder="name — work, personal, staging" aria-label="account name" required>
+        </div>
+        <input id="a_label" placeholder="label — optional" aria-label="account label">
+        <div id="aFields" class="stack"></div>
+        <label class="hint" style="padding:0; display:flex; align-items:center; gap:7px; cursor:pointer">
+          <input id="a_active" type="checkbox"> make this the active account for its provider
+        </label>
+        <input id="a_notes" placeholder="notes — optional" aria-label="notes">
+        <button type="submit" class="primary">save account</button>
+      </form>
     </section>
   </div>
 </div>

@@ -54,4 +54,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 p=os.environ.get('AGENT_LINUX_PORT') or os.environ.get('PORT') or '3100'; \
 sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/health', timeout=4).status==200 else 1)"
 
-CMD ["python3", "-m", "terminal.service"]
+CMD ["python3", "-m", "agent_linux.service"]
