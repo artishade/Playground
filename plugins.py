@@ -8,7 +8,7 @@ Two kinds, and the difference matters:
                            the safe path and covers most "call my API" plugins.
 
     python (opt-in)        A file with a `run(args) -> dict` function, loaded
-                           only when NOVA_PLUGINS_ALLOW_CODE=1. Same trust level
+                           only when AGENT_LINUX_PLUGINS_ALLOW_CODE=1. Same trust level
                            as shell access, which the terminal already has —
                            but it is off unless a deployer says otherwise, so
                            an upload can never become remote code execution by
@@ -36,6 +36,7 @@ from typing import Any
 
 import httpx
 
+from . import env
 from .store import StoreError, get_store, valid_key
 
 log = logging.getLogger("terminal.plugins")
@@ -57,7 +58,7 @@ class PluginError(RuntimeError):
 
 
 def allow_code() -> bool:
-    return os.environ.get("NOVA_PLUGINS_ALLOW_CODE") in ("1", "true", "yes")
+    return env.flag("PLUGINS_ALLOW_CODE")
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +168,7 @@ async def save_plugin(plugin: dict[str, Any]) -> dict[str, Any]:
     if plugin.get("kind") == "python" and not allow_code():
         raise PluginError(
             "python plugins are disabled on this host. A declarative http plugin "
-            "needs no code and works now; set NOVA_PLUGINS_ALLOW_CODE=1 to enable "
+            "needs no code and works now; set AGENT_LINUX_PLUGINS_ALLOW_CODE=1 to enable "
             "python plugins (same trust as shell access)."
         )
     plugin["name"] = name
@@ -299,7 +300,7 @@ def run_python(plugin: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     that is deleted leaves nothing behind, and nothing can import it by accident.
     """
     if not allow_code():
-        return {"error": "python plugins are disabled on this host (NOVA_PLUGINS_ALLOW_CODE)"}
+        return {"error": "python plugins are disabled on this host (AGENT_LINUX_PLUGINS_ALLOW_CODE)"}
     code = plugin.get("code") or ""
     if not code.strip():
         return {"error": f"plugin '{plugin['name']}' has no code"}

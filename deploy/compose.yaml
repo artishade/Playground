@@ -1,7 +1,7 @@
 # docker compose — the "I own a VPS" path.
 #
 #   cd terminal
-#   NOVA_TERMINAL_TOKEN=$(openssl rand -hex 24) docker compose up -d
+#   AGENT_LINUX_TOKEN=$(openssl rand -hex 24) docker compose up -d
 #
 # Pair it with Caddy/Traefik for TLS, or put it behind Cloudflare Tunnel if the
 # box has no public IP. A named volume keeps the workspace across `up --build`,
@@ -11,20 +11,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: novarouter-terminal:latest
+    image: agent-linux:latest
     restart: unless-stopped
     ports:
       - "3100:3100"
     environment:
       # Required in practice: this container serves root shells.
-      NOVA_TERMINAL_TOKEN: ${NOVA_TERMINAL_TOKEN:?set NOVA_TERMINAL_TOKEN first}
-      NOVA_TERMINAL_HOST: 0.0.0.0
-      NOVA_TERMINAL_PORT: "3100"
-      NOVA_BUILD_ROOT: /data/build
+      AGENT_LINUX_TOKEN: ${AGENT_LINUX_TOKEN:?set AGENT_LINUX_TOKEN first}
+      AGENT_LINUX_HOST: 0.0.0.0
+      AGENT_LINUX_PORT: "3100"
+      AGENT_LINUX_BUILD_ROOT: /data/build
       # Any OpenAI-compatible /v1 endpoint. Unset → Agentbox stays off.
-      NOVA_AGENTBOX_BASE_URL: ${NOVA_AGENTBOX_BASE_URL:-}
-      NOVA_AGENTBOX_API_KEY: ${NOVA_AGENTBOX_API_KEY:-}
-      NOVA_AGENTBOX_MODEL: ${NOVA_AGENTBOX_MODEL:-}
+      AGENT_LINUX_AGENTBOX_BASE_URL: ${AGENT_LINUX_AGENTBOX_BASE_URL:-}
+      AGENT_LINUX_AGENTBOX_API_KEY: ${AGENT_LINUX_AGENTBOX_API_KEY:-}
+      AGENT_LINUX_AGENTBOX_MODEL: ${AGENT_LINUX_AGENTBOX_MODEL:-}
     volumes:
       - nova_build:/data
     healthcheck:

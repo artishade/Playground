@@ -1,15 +1,15 @@
-"""Terminal link — the one seam between NovaRouter and its terminal.
+"""Terminal link — the one seam between Agent_Linux and its terminal.
 
 The interactive terminal can be hosted **separately** from the rest of the
 app (its own process, its own port, another machine) while the project stays
 connected to it:
 
-    NOVA_TERMINAL_URL unset → LocalLink   — `terminal.pty.manager` in this process
-    NOVA_TERMINAL_URL set   → RemoteLink  — HTTP + SSE to the terminal service
+    AGENT_LINUX_TERMINAL_URL unset → LocalLink   — `agent_linux.pty.manager` in this process
+    AGENT_LINUX_TERMINAL_URL set   → RemoteLink  — HTTP + SSE to the terminal service
 
 Both links expose the same async surface, so the routes in
-`terminal/api.py` — and therefore the dashboard, the API and the agent —
-behave identically in both modes. `terminal/service.py` mounts those same
+`agent_linux/api.py` — and therefore the dashboard, the API and the agent —
+behave identically in both modes. `agent_linux/service.py` mounts those same
 routes over a LocalLink, which is what keeps the two hosts contract-identical
 instead of merely similar.
 
@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
 
-from . import config          # `terminal/config.py` — this terminal's own settings
+from . import config          # `agent_linux/config.py` — this terminal's own settings
 from .pty import (
     SessionLimitReached,
     agent_session,
@@ -36,7 +36,7 @@ from .pty import (
     shell_hint,
 )
 
-log = logging.getLogger("terminal.link")
+log = logging.getLogger("agent_linux.link")
 
 # Long-lived SSE: no read timeout, or the stream dies on an idle shell.
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=30.0)
@@ -64,7 +64,7 @@ class SessionGone(TerminalError):
     status = 404
 
 
-# `terminal.pty.SessionLimitReached` is the single session-cap error in the
+# `agent_linux.pty.SessionLimitReached` is the single session-cap error in the
 # codebase (the manager raises it, the routes catch it); it is re-exported here
 # so a caller holding a link only ever imports one module.
 SessionLimitReached.code = "session_limit"  # type: ignore[attr-defined]
@@ -106,7 +106,7 @@ def error_from_payload(payload: Any, status: int) -> TerminalError:
 
 
 class LocalLink:
-    """`terminal.pty.manager` behind the async link surface.
+    """`agent_linux.pty.manager` behind the async link surface.
 
     Every call that touches a PTY is pushed onto a worker thread: `create()`
     forks, `write()` blocks on the tty, and the stream loop would otherwise
@@ -246,7 +246,7 @@ class LocalLink:
 class RemoteLink:
     """Talks to a separately hosted terminal over HTTP + SSE.
 
-    The service runs the very same routes (`terminal/api.py` over a
+    The service runs the very same routes (`agent_linux/api.py` over a
     LocalLink), so every response here has the shape the dashboard already
     knows. `transport` exists so the offline test suite can drive the whole
     client through an `httpx.MockTransport`.

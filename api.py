@@ -1,15 +1,15 @@
 """The terminal's HTTP contract — mounted by BOTH hosts.
 
   main.py              → /api/admin/terminal/pty/*   (the dashboard's API)
-  terminal/service.py  → /terminal/pty/*             (standalone service)
+  agent_linux/service.py  → /terminal/pty/*             (standalone service)
 
-Both mount *this* router over the same `terminal.link` surface, so a
+Both mount *this* router over the same `agent_linux.link` surface, so a
 terminal hosted separately is not a reimplementation of these routes — it is
 the same routes, with the local link underneath. That is what keeps the two
 hosts from drifting: every response shape, status code and SSE frame is defined
 exactly once, here.
 
-Every handler resolves the link per request (`terminal.link.current()`), so
+Every handler resolves the link per request (`agent_linux.link.current()`), so
 the standalone service can pin itself to the local link and the app can switch
 between in-process and remote purely from configuration.
 """
@@ -20,8 +20,8 @@ import json
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from terminal import link
-from terminal.link import SessionGone, SessionLimitReached, TerminalError
+from agent_linux import link
+from agent_linux.link import SessionGone, SessionLimitReached, TerminalError
 
 router = APIRouter()
 

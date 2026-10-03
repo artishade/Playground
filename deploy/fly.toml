@@ -3,21 +3,21 @@
 #
 #   fly launch --dockerfile terminal/Dockerfile --no-deploy
 #   fly volumes create nova_build --size 1
-#   fly secrets set NOVA_TERMINAL_TOKEN=$(openssl rand -hex 24)
+#   fly secrets set AGENT_LINUX_TOKEN=$(openssl rand -hex 24)
 #   fly deploy
 #
 # `auto_stop_machines` is deliberately false: a terminal that sleeps is a
 # terminal that loses your shell mid-`apt install`. That is the whole reason to
 # pay ~$2–3/month here instead of living on a sleeping free tier.
-app = "novarouter-terminal"
+app = "agent-linux"
 primary_region = "sin"
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
-  NOVA_BUILD_ROOT = "/data/build"
-  NOVA_TERMINAL_HOST = "0.0.0.0"
+  AGENT_LINUX_BUILD_ROOT = "/data/build"
+  AGENT_LINUX_HOST = "0.0.0.0"
 
 [[mounts]]
   source = "nova_build"

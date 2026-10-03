@@ -1,394 +1,644 @@
-# `terminal/` — NovaRouter's terminal, one path, hostable alone
+# Agent_Linux
 
-Everything the project does with an interactive shell lives in this directory.
-Nothing terminal-related exists outside it, and the rest of the app reaches it
-only through `terminal.*` imports:
+A **root Linux shell, a live Chromium browser, and an AI agent that drives both** —
+in one self-contained package you can deploy anywhere.
 
-```python
-from terminal import link                                   # the seam (LocalLink/RemoteLink)
-from terminal.api import router as terminal_router          # the HTTP contract
-from terminal.sandbox import execute_command                # one-shot allowlist exec
+Agent_Linux is not a terminal emulator widget. It is a real PTY-backed root shell
+(8 concurrent sessions, `vim`, `top`, `ssh`, `sudo` all behave), a real Chromium
+page you and the agent share, and an agent that can add its own capabilities by
+connecting MCP servers, uploading skills and registering plugins.
+
+```
+┌──────────────────────────── console (served at /) ─────────────────────────────┐
+│  ┌─ shell ──────────────────────┐  ┌─ AGENTBOX ─────────────────────────────┐  │
+│  │ ~ AgentLinux:/app/build#      │  │ you  deploy this and tail the log      │  │
+│  │ $ ls                          │  │ bot  opening the deploy tab…           │  │
+│  │   README.md  app/  dist/      │  │      $ npm run deploy  ← runs in a tab │  │
+│  │                               │  │      $ tail -f /var/log/deploy.log     │  │
+│  └───────────────────────────────┘  └────────────────────────────────────────┘  │
+│  [shell] [browser]   ← toggle (Alt+B): the same Chromium the agent drives       │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**This package is self-contained.** It imports nothing from `nova/`, needs no
-database, and reads the environment itself — so you can copy this one directory
-to another machine and run the whole terminal there, with or without a
-NovaRouter gateway pointing at it.
+---
 
-## Layout
+## Table of contents
 
-| File | Role |
+1. [What it is](#what-it-is)
+2. [Use cases](#use-cases)
+3. [Architecture](#architecture)
+4. [Project structure](#project-structure)
+5. [Backend logic](#backend-logic)
+6. [The HTTP contract](#the-http-contract)
+7. [Connection & configuration](#connection--configuration)
+8. [Setup](#setup)
+9. [Deploy](#deploy)
+10. [Security model](#security-model)
+11. [Troubleshooting](#troubleshooting)
+12. [Renaming from NovaRouter](#renaming-from-novarouter)
+
+---
+
+## What it is
+
+Three products that share one process, one port and one page:
+
+| | What you get |
 | --- | --- |
-| `pty.py` | Real PTY sessions behind the Terminal tabs: max 8 concurrent, OSC 7 cwd tracking, 30-min idle reap, labelled agent tabs |
-| `sandbox.py` | Simulated allowlist executor for one-shot commands. Only module that *borrows* the app (command history, `nova …`), and it degrades honestly when the app isn't there |
-| `link.py` | The seam. `LocalLink` (shells in this process) / `RemoteLink` (HTTP + SSE to another host), chosen by configuration |
-| `api.py` | The HTTP contract — mounted by **both** hosts, so they cannot drift |
-| `agentbox.py` | **Agentbox**, the AI agent that ships with the terminal (`/agent/*`) |
-| `extensions.py` | The extension surface: MCP servers, skills, plugins, database (`/agent/extensions/*`) |
-| `mcp.py` | MCP client — Streamable HTTP + stdio, tool namespacing, per-turn tool bridge |
-| `skills.py` | Uploadable `SKILL.md` / `.zip` bundles, with progressive disclosure into the prompt |
-| `plugins.py` | Declarative HTTP tools (safe default) and opt-in local Python plugins |
-| `store.py` | Pluggable persistence: `file` (default) · `supabase` · `postgres` (Neon/Railway/…) |
-| `browser.py` | The live Chromium session the user and the agent share (optional dependency) |
-| `browser_api.py` | Its HTTP surface: SSE frame stream, navigation and actions |
-| `web/console.html` | **The console page** — shell tabs and a live browser on one side, the agent on the other. Served at `/` |
-| `web/console.js` | Its client: session tabs, SSE stream, xterm.js (with a plain-viewer fallback), the browser pane, chat, providers, themes, shortcuts, extensions drawer |
-| `service.py` | The standalone host: `python3 -m terminal.service` |
-| `config.py` | Every `NOVA_TERMINAL_*` / `NOVA_AGENTBOX_*` knob |
-| `Dockerfile` | Builds this directory **alone** — no gateway, no database, no UI |
-| `deploy/` | Per-platform configs + the hosting decision (`deploy/README.md`) and a `smoke.sh` health test |
+| **Root shell** | Real PTY sessions in `pty.fork()`. Max 8 tabs, OSC 7 working-directory tracking, 30-minute idle reap, labelled agent tabs. Everything a terminal should do — colour, cursor, `vim`, `top`, interactive `ssh` — works because it *is* a terminal. |
+| **Live browser** | One long-lived Chromium the user watches as a ~700 ms JPEG frame stream and the agent drives through tools. Clicking the frame clicks the page. The agent's actions appear in the frame you are looking at. |
+| **AI agent (Agentbox)** | Any OpenAI-compatible `/v1` endpoint. It runs shell commands **in a tab you can watch**, browses the web, queries your database, and can be extended at runtime with MCP servers, skills and plugins. |
 
-## Deploy just the terminal
+**One rule holds the whole thing together:** `agent_linux/` runs standalone. It
+needs no gateway, no dashboard and **no database**. Copy the directory to a host
+and `python3 -m agent_linux.service` gives you all three products. A database,
+Playwright and an AI provider are all *optional* — each one is detected, and its
+absence degrades honestly instead of breaking anything.
 
-Pick whichever fits your host:
-
-```bash
-# Docker (build context = this directory)
-docker build -t novarouter-terminal ./terminal
-docker run -p 3100:3100 \
-  -e NOVA_TERMINAL_TOKEN=<shared secret> \
-  -e NOVA_AGENTBOX_BASE_URL=https://api.groq.com/openai/v1 \
-  -e NOVA_AGENTBOX_API_KEY=<key> \
-  novarouter-terminal
-
-# or straight from source (needs fastapi, uvicorn, httpx)
-sh ./terminal/run.sh
-# python3 -m terminal.service
-```
-
-Then point a NovaRouter app at it, or ignore Nova entirely and use it directly:
-
-```bash
-NOVA_TERMINAL_URL=http://terminal-host:3100 \
-NOVA_TERMINAL_TOKEN=<same secret> \
-python3 main.py
-```
-
-### The console
-
-Open `http://<terminal-host>:3100/` and you are in the workspace: session tabs
-along the top, a real shell (xterm.js — colour, cursor, `vim`, `top`), and
-Agentbox on the right. Click a tab to switch, double-click to rename, `×` to
-close, **new tab** for another shell. The terminal host serves this page itself,
-so a deployed terminal is usable with nothing else running; if the xterm CDN is
-unreachable the page falls back to a plain append-only viewer instead of
-rendering nothing.
-
-If the host has a `NOVA_TERMINAL_TOKEN`, the page asks for it once (a browser
-navigation cannot send a header) and keeps it locally; every API call after that
-carries it. `/health` and the page itself stay open — they leak nothing.
-
-`NOVA_TERMINAL_URL` unset (the default) means the app keeps the terminal
-in-process and none of this is run — same shells, same routes, one process.
-
-### Where to host it, and what "free" really buys you
-
-`deploy/README.md` is the decision table (checked against vendor pricing in
-Sep–Oct 2026), not a link dump. The short version: **every free container host
-spins down when nobody is looking**, which is the opposite of what a shell
-needs. Two configs are ready to go:
-
-```bash
-# Free, and the only free tier that does not sleep after 15 minutes.
-# cpu-basic Spaces pause after 48h idle, and /data survives restarts.
-#   → deploy/hf-space/README.md, deploy/hf-space/Dockerfile
-
-# ~$2–3/mo, always-on, persistent volume, auto_stop_machines = false.
-#   → deploy/fly.toml
-```
-
-`deploy/render.yaml` (free, 750 h/mo, 15-min sleep) and `deploy/compose.yaml`
-(your own VPS) cover the middle ground. Whatever you pick, verify it in one shot:
-
-```bash
-BASE=https://your-host TOKEN=<secret> sh deploy/smoke.sh
-```
-
-The image adapts to its host rather than the other way round: it binds
-`NOVA_TERMINAL_PORT`, then `$PORT`, then 3100 (`NOVA_TERMINAL_HOST` defaults to
-`0.0.0.0`, set `127.0.0.1` for a loopback-only box), and `NOVA_BUILD_ROOT` should
-point at the host's persistent path so a redeploy does not wipe your workspace.
-
-| Variable | Where | What it does |
-| --- | --- | --- |
-| `NOVA_TERMINAL_PORT` | host | Its own port. Precedence: `NOVA_TERMINAL_PORT` → `$PORT` (injected by most free hosts) → `3100`, never the app's |
-| `NOVA_TERMINAL_HOST` | host | Bind address, default `0.0.0.0`; `127.0.0.1` for a loopback-only deploy |
-| `NOVA_TERMINAL_URL` | app | Set it to use a separately hosted terminal |
-| `NOVA_TERMINAL_TOKEN` | **both** | Shared secret for `X-Nova-Terminal-Token`; gates real root shells |
-| `NOVA_TERMINAL_PUBLIC_URL` | host | Cosmetic; echoed in `/health` so you can tell which deployment answered |
-| `NOVA_BUILD_ROOT` | host | Where shells start (default `/app/build`; point it at the host's persistent path) |
-| `NOVA_AGENTBOX_BASE_URL` | host | Any OpenAI-compatible `/v1` endpoint — the agent's brain |
-| `NOVA_AGENTBOX_API_KEY` | host | Its API key |
-| `NOVA_AGENTBOX_MODEL` | host | Model id (default: first the endpoint offers) |
-| `NOVA_AGENTBOX_PROVIDER_FILE` | host | Where saved custom providers live (default: `<workspace>/.agentbox-providers.json`) |
-| `NOVA_AGENTBOX_MAX_STEPS` | host | Step budget per task (default 8) |
-
-Notes:
-- Use `python3 -m terminal.service`, not `python3 terminal/service.py`: the
-  module form puts this directory's parent on `sys.path`, which `terminal.*`
-  imports need. The directory must be named `terminal`.
-- `/health` and the Agentbox page are open; everything else needs the token
-  (`X-Nova-Terminal-Token` or `Authorization: Bearer …`). The page asks for it
-  once and keeps it locally. An unset token is only sane on loopback and is
-  called out loudly at boot.
-
-## Routes (identical on both hosts)
-
-`GET/POST /sessions`, `POST /activate`, `POST /rename`, `GET /stream` (SSE),
-`POST /input`, `POST /resize`, `POST /stop`, `POST /run` — mounted by the
-gateway at `/api/admin/terminal/pty/*` and by this host at `/terminal/pty/*`.
-
-Errors always carry a stable `code` (`session_gone`, `session_limit`,
-`session_start_failed`, `session_write_failed`, `link_unavailable`) so a remote
-failure reads exactly like a local one.
-
-## Agentbox
-
-A root prompt is only half a product, so the terminal host ships the agent too:
-
-```
-POST   /agent/chat                 {message, provider?, model?, history?} → {reply, steps[]}
-GET    /agent/providers            list custom providers (keys masked)
-POST   /agent/providers            add or update one
-DELETE /agent/providers/{id}       forget one
-GET    /agent/models?provider=id   what that provider can think with
-GET    /agent                      the page — shells on one side, agent on the other
-```
-
-Its tools (`run_command`, `read_file`, `write_file`, `list_sessions`, `finish`)
-all run **in a real terminal tab you can watch**, so a task is visible while it
-happens and its shell state survives between steps.
-
-### Custom providers
-
-Any OpenAI-compatible `/v1` endpoint can back the agent — Groq, OpenRouter,
-OpenAI, a local vLLM/Ollama, or a NovaRouter gateway's own `/v1`. Add as many
-as you like, side by side, and pick one per message:
-
-```bash
-curl -XPOST http://terminal-host:3100/agent/providers \
-  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
-  -d '{"id":"groq","label":"Groq","base_url":"https://api.groq.com/openai/v1",
-       "api_key":"…","model":"llama-3.3-70b"}'
-
-curl -XPOST http://terminal-host:3100/agent/chat \
-  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
-  -d '{"message":"tail the deploy log","provider":"groq"}'
-```
-
-- Saved to `<workspace>/.agentbox-providers.json`, mode `0600`. Override the
-  path with `NOVA_AGENTBOX_PROVIDER_FILE`.
-- An API key is **only ever echoed back masked** (`dem…456`), so the page and
-  `GET /agent/providers` can show which key is set without leaking it. Editing
-  a provider with a blank key keeps the stored one.
-- `NOVA_AGENTBOX_BASE_URL` / `_API_KEY` / `_MODEL` register one provider called
-  `env`, and it wins by default — a deployer can bake in the endpoint while the
-  user still adds others. It cannot be deleted over the API; unset the
-  variables instead.
-- The page has the same controls under **providers**: add, switch, remove.
-- With no provider at all the agent stays off and says so: `503` with
-  `code: agentbox_unconfigured`, and `/health` reports
-  `agentbox.configured: false`. It never calls out on its own.
-
-## Extensions — MCP servers, skills, plugins, and a database
-
-The agent's built-in tools are five shell-shaped verbs plus `read_skill`,
-`read_skill_file` and `sql`. Everything else it can do is added here, through one
-router (`/agent/extensions/*`) and one console drawer (**⧉** in the topbar).
-
-### MCP servers
-
-Connect Model Context Protocol servers and their tools join the agent's toolbox
-automatically. Two transports:
-
-```bash
-# Remote (Streamable HTTP). Secrets come from the host environment:
-curl -XPOST http://host:3100/agent/extensions/mcp \
-  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
-  -d '{"id":"remote","url":"https://mcp.example.com/mcp",
-       "headers":{"authorization":"Bearer ${env.MCP_TOKEN}"}}'
-
-# Local (stdio) — the usual `npx` servers:
-curl -XPOST http://host:3100/agent/extensions/mcp \
-  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
-  -d '{"id":"fetch","transport":"stdio","command":"npx",
-       "args":["-y","@modelcontextprotocol/server-fetch"]}'
-
-curl -XPOST http://host:3100/agent/extensions/mcp/fetch/test   # connect + list tools
-```
-
-- Tools are namespaced `mcp__<server>__<tool>` before the model sees them, so two
-  servers can both expose `search` — and a tool call routes back by parsing the name.
-- `tools/list` is cached for 5 minutes; the agent does not pay a round trip per message.
-- **One broken server never breaks the agent.** It is reported in the reply's
-  `extensions` field and on the console, and skipped.
-- `NOVA_MCP_SERVERS` bakes servers in at deploy time (JSON array); those are
-  read-only over the API.
-
-### Skills
-
-Upload a `.md` with frontmatter, or a `.zip` bundle containing a `SKILL.md`
-plus any files it references:
-
-```
-POST /agent/extensions/skills/upload        multipart, field `file`
-```
-
-```markdown
----
-name: release-notes
-description: Turn a git log into user-facing release notes.
-when_to_use: When the user asks for a changelog.
 ---
 
-1. Run `git log --oneline <last-tag>..HEAD`.
-2. Group commits into Added / Changed / Fixed.
+## Use cases
+
+**1. A cloud dev box you can talk to**
+Deploy to a free host, open the console, and you have a root shell in a browser
+plus an agent that can `git clone`, install dependencies, run your build, read
+the failure, and fix it — while you watch every command land in a tab.
+
+**2. Agentic web automation**
+"Log into the dashboard and download last month's invoices." The agent opens the
+page, reads the interactive elements, fills the form, clicks submit, and hands
+you the file. Because the browser is shared, you can take over the moment it hits
+a 2FA prompt.
+
+**3. Scraping and research without an API**
+`browser_eval` runs JavaScript in a real page, so the agent extracts structured
+data from sites that have no API and no clean HTML — the same way you would with
+the devtools console open.
+
+**4. A personal ops assistant**
+Connect the GitHub MCP server and a Postgres MCP server, upload a `deploy.md`
+skill, and the agent can open PRs, query production read-only, and follow *your*
+runbook rather than guessing.
+
+**5. Sandboxed code execution for your own product**
+The HTTP contract is stable and token-gated: build a UI, a bot, or a CI job that
+asks Agent_Linux to run something and read the output. The agent's `run_command`
+and the `/run` route both execute in the same visible, stateful shells.
+
+**6. Teaching and demos**
+Two people can watch the same session: one drives the browser, the other types in
+the shell, and the agent narrates in the third pane. Everything is one page.
+
+---
+
+## Architecture
+
+```
+                          ┌──────────────────────────────────────┐
+   browser (you)  ────────▶│  console  /  (web/console.html+js)   │
+                          └───────┬──────────────────┬───────────┘
+                                  │ SSE: shell bytes │ SSE: browser frames
+                                  ▼                  ▼
+   ┌────────────────────────────────────────────────────────────────────┐
+   │                      agent_linux.service  (:3100)                   │
+   │                                                                     │
+   │  api.py ─────────── the shell contract  /terminal/pty/*             │
+   │  browser_api.py ─── the browser surface /agent/browser/*            │
+   │  agentbox.py ────── the agent           /agent/*                    │
+   │  extensions.py ──── MCP/skills/plugins  /agent/extensions/*         │
+   └───────┬──────────────┬───────────────┬──────────────┬──────────────┘
+           │              │               │              │
+           ▼              ▼               ▼              ▼
+     ┌──────────┐   ┌──────────┐   ┌───────────┐  ┌──────────────┐
+     │  pty.py  │   │browser.py│   │ agentbox  │  │   store.py   │
+     │ 8 PTYs   │   │ 1 Chromium│  │ tool loop │  │ file|pg|sb   │
+     └──────────┘   └──────────┘   └─────┬─────┘  └──────────────┘
+                                        │
+                    ┌───────────────────┼────────────────────┐
+                    ▼                   ▼                    ▼
+              ┌──────────┐       ┌───────────┐        ┌───────────┐
+              │  mcp.py  │       │ skills.py │        │plugins.py │
+              │ MCP srvrs│       │ SKILL.md  │        │ http/py   │
+              └──────────┘       └───────────┘        └───────────┘
 ```
 
-Skills use **progressive disclosure**: the system prompt carries only a one-line
-index per skill, and the agent calls `read_skill` when a task matches. A library
-of twenty skills costs twenty lines of context, not twenty documents. Bundle
-files are readable with `read_skill_file`.
+### The `link.py` seam
 
-### Plugins
+The one abstraction that makes the package portable. The same shell contract is
+served either **in-process** or by **another host**:
 
-A declarative plugin is a name, an argument schema, and a request — **the host
-runs no third-party code**:
-
-```bash
-curl -XPOST http://host:3100/agent/extensions/plugins \
-  -H 'X-Nova-Terminal-Token: <secret>' -H 'content-type: application/json' \
-  -d '{"name":"notify-slack","description":"Post to Slack",
-       "parameters":{"type":"object",
-                     "properties":{"text":{"type":"string"}},"required":["text"]},
-       "request":{"method":"POST","url":"${env.SLACK_WEBHOOK_URL}",
-                  "body":{"text":"${text}"}}}'
+```
+AGENT_LINUX_URL unset  →  LocalLink    shells live in this process
+AGENT_LINUX_URL set    →  RemoteLink   HTTP + SSE to a separately hosted terminal
 ```
 
-`${arg}` comes from the model's tool call, `${env.NAME}` from the host
-environment — so a token lives in the deployment and never in the model's
-context. A plugin that needs real code is a `kind: "python"` plugin with a
-`run(args)` function, enabled only with `NOVA_PLUGINS_ALLOW_CODE=1` (same trust
-level as the shell, which is why it is opt-in).
+Both expose the same async surface, so `api.py` — and therefore every client —
+cannot tell the difference. A remote failure rebuilds into the same exception
+locally, because errors cross the seam as stable `code` strings.
 
-### The database — `file` by default, Supabase/Neon when you want it
+### Data flow of one agent turn
 
-Skills, MCP servers and plugins are stored through one pluggable backend, so
-`terminal/` still needs **no database** out of the box:
+```
+1. POST /agent/chat  {message, provider?}
+2. system prompt assembled:   base rules
+                            + skills index        (one line per skill)
+                            + database note       (if a DB is connected)
+                            + browser note        (if Playwright is present)
+3. tool list assembled: built-ins (13) + MCP tools (mcp__* ) + plugins (plugin__*)
+4. loop, up to AGENT_LINUX_AGENTBOX_MAX_STEPS:
+      model → tool_calls → run_tool() → result → back to the model
+5. every shell-shaped tool types into a REAL tab you are watching
+6. `finish` or no more tool calls → reply + the full step list
+```
 
-| `NOVA_STORE_BACKEND` | What it is | SQL tool | Needs |
+---
+
+## Project structure
+
+```
+agent_linux/
+├── __init__.py          package entry; re-exports the link seam only (cheap imports)
+├── service.py           the standalone host — FastAPI app, middleware, routes, /health
+├── config.py            every setting, read through env.py
+├── env.py               AGENT_LINUX_* with NOVA_* fallback + the security alias map
+├── link.py              the seam: LocalLink / RemoteLink, and the error vocabulary
+├── api.py               the shell HTTP contract (mounted by both hosts)
+├── pty.py               real PTY session manager (the shells behind the tabs)
+├── sandbox.py           simulated allowlist executor + `nova` help text
+├── agentbox.py          the agent: tools, providers, the tool loop
+├── extensions.py        MCP + skills + plugins + database, as one router
+├── mcp.py               MCP client: Streamable HTTP and stdio
+├── skills.py            SKILL.md / .zip parsing and progressive disclosure
+├── plugins.py           declarative HTTP tools + opt-in python plugins
+├── store.py             pluggable persistence: file | supabase | postgres
+├── browser.py           the shared Chromium session
+├── browser_api.py       the browser's HTTP surface + frame stream
+├── web/
+│   ├── console.html     the console page (5 themes, drawer, browser pane)
+│   └── console.js       its client (SSE, xterm.js, frame renderer, shortcuts)
+├── deploy/
+│   ├── README.md        which host to pick, and what "free" really costs
+│   ├── smoke.sh         one-shot health/contract test for a deployment
+│   ├── compose.yaml     your own VPS, with a persistent volume
+│   ├── fly.toml         ~$2–3/mo always-on with a volume
+│   ├── render.yaml      free, 750 h/mo, sleeps after 15 min
+│   └── hf-space/        free, does NOT sleep after 15 min — the best free tier
+├── Dockerfile           builds this directory alone
+├── requirements.txt     3 required packages, 2 documented optional ones
+└── run.sh               launcher for the standalone host
+```
+
+**Dependency direction is one-way.** `agent_linux` never imports a host
+application. `__init__.py` deliberately does not import `api.py` (FastAPI) or
+`sandbox.py`, so importing the seam stays cheap on both sides.
+
+---
+
+## Backend logic
+
+### `pty.py` — real shells
+
+Each `TerminalSession` is a `pty.fork()`; the child execs `bash` with a generated
+rcfile so the prompt and MOTD always win over the image's `/root/.bashrc`.
+
+- **Working directory** — the shell emits OSC 7 before every prompt; a reader
+  thread parses it, so the tab list shows a real path after `cd`. A 256-byte tail
+  is retained across reads so a sequence split between chunks still parses.
+- **Scrollback** — 512 KB ring per session, and the cursor is a *total-bytes*
+  counter rather than a buffer index, so it stays correct after the ring trims.
+- **Lifecycle** — 8-session hard cap (`session_limit`), 30-minute idle reap,
+  `SIGHUP` then `SIGKILL` on close, all PTYs torn down at shutdown.
+
+### `agentbox.py` — the tool loop
+
+Three groups of tools, and the routing is by name so an invented tool fails
+loudly rather than silently doing nothing:
+
+| Group | Tools |
+| --- | --- |
+| Shell & files | `run_command`, `read_file`, `write_file`, `list_sessions`, `finish` |
+| Knowledge | `read_skill`, `read_skill_file`, `sql` |
+| Browser | `browser_open`, `browser_read`, `browser_click`, `browser_type`, `browser_scroll`, `browser_eval`, `browser_screenshot` |
+| MCP | `mcp__<server>__<tool>` — every tool of every enabled server |
+| Plugins | `plugin__<name>` — one per registered plugin |
+
+**Providers** are OpenAI-compatible endpoints, from two sources: the environment
+(`id: env`, cannot be deleted) and `POST /agent/providers` (persisted, keys
+returned masked). With none configured the agent answers `503
+agentbox_unconfigured` and `/health` says `configured: false` — it never calls
+out on its own.
+
+### `browser.py` — one Chromium, two drivers
+
+Every action serialises on a single `asyncio.Lock`, so a user's click and the
+agent's keystroke can never interleave halfway. Frames are the exception: a
+request arriving mid-action returns `204` rather than queueing behind a slow
+navigation, because a stale frame beats a laggy live view.
+
+`browser_read` returns the page text **and the interactive elements** with their
+text/name/id — that is what lets the model click a button by its label instead of
+guessing a selector that does not exist.
+
+### `store.py` — persistence that is optional
+
+| `AGENT_LINUX_STORE_BACKEND` | What it is | `sql` tool | Needs |
 | --- | --- | --- | --- |
 | `file` *(default)* | JSON under `<workspace>/.nova-store/` | ✗ | nothing |
-| `supabase` | PostgREST, table `nova_docs` | ✗ | project URL + service key |
+| `supabase` | PostgREST table | ✗ | project URL + service key |
 | `postgres` | DSN — Neon, Supabase, Railway, RDS | ✓ | `pip install asyncpg` |
 
+Documents hold MCP servers, skills and plugins. File writes are
+write-then-`os.replace`, so a crash cannot truncate a good document.
+
+### `env.py` — the rename that cannot hurt you
+
+Every setting is `AGENT_LINUX_*`. The legacy `NOVA_*` names are still read, and
+the alias map handles suffixes that were *shortened* in the rename:
+
+```python
+AGENT_LINUX_PORT   ←  NOVA_TERMINAL_PORT      (alias, still honoured)
+AGENT_LINUX_TOKEN  ←  NOVA_TERMINAL_TOKEN     (alias, always honoured)
+```
+
+The token is read from both prefixes **unconditionally** and logs a loud warning.
+The failure mode being designed against is specific and nasty: an operator
+upgrades, their old token is no longer recognised, and the service hands out root
+shells to anyone who can reach the port. That cannot happen here.
+
+---
+
+## The HTTP contract
+
+Everything is under one of three prefixes. `X-Nova-Terminal-Token` (or
+`Authorization: Bearer …`) is required on all of it except `/health`, `/` and
+`/static/console.js`.
+
+### Shell — `/terminal/pty/*`
+
+*This prefix is an API contract and is deliberately unchanged by the rename.*
+
+| Method | Path | Body → Response |
+| --- | --- | --- |
+| `GET` | `/sessions` | → `{sessions[], active, max_sessions}` |
+| `POST` | `/sessions` | `{cwd?, cols?, rows?, label?}` → `{session, info}` |
+| `POST` | `/activate` | `{session}` → `{info}` |
+| `POST` | `/rename` | `{session, label}` → `{info}` |
+| `GET` | `/stream` | `?session=&offset=` → **SSE**: `{o, cwd, done, exit}` |
+| `POST` | `/input` | `{session, data}` — raw keystrokes, `\r`, `\u0003`, arrows |
+| `POST` | `/resize` | `{session, cols, rows}` |
+| `POST` | `/stop` | `{session}` → `{state}` |
+| `POST` | `/run` | `{command, label?, timeout?}` → `{output, code}` |
+
+Errors always carry a stable `code`: `session_gone`, `session_limit`,
+`session_start_failed`, `session_write_failed`, `link_unavailable`.
+
+### Agent — `/agent/*`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/chat` | `{message, provider?, model?, history?, label?}` → `{reply, steps[], extensions[]}` |
+| `GET` | `/providers` | list (keys masked) |
+| `POST` | `/providers` | add/update one |
+| `DELETE` | `/providers/{id}` | forget one |
+| `GET` | `/models` | `?provider=` → what that endpoint offers |
+| `GET` | `/` | the console page |
+
+### Browser — `/agent/browser/*`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `` | `{running, url, title, viewport, available, counters}` |
+| `POST` | `/start` `/stop` `/resize` | lifecycle |
+| `POST` | `/navigate` | `{url, wait?}` |
+| `POST` | `/action` | `{action: click\|type\|press\|scroll\|back\|goto, …}` |
+| `GET` | `/frame` | one JPEG, or `204` while busy |
+| `GET` | `/stream` | **SSE**: `frame` (base64 jpeg), `state`, `error` |
+
+> The frame stream accepts the token as `?token=` because `EventSource` cannot
+> send headers. It is a read-only stream of a page that token can already drive —
+> the usual trade for a live view. Every other route uses the normal header.
+
+### Extensions — `/agent/extensions/*`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `` | what is installed, and on which store backend |
+| `GET` | `/tools` | every extra tool the agent would see |
+| `GET` | `/catalogue` | ready-made MCP/skill/plugin examples |
+| `GET` `POST` `DELETE` | `/mcp[/{id}]` | MCP servers |
+| `POST` | `/mcp/{id}/test` `/toggle` | connect & list tools · enable/disable |
+| `GET` `POST` | `/skills` | skills |
+| `POST` | `/skills/upload` | multipart `.md` or `.zip` |
+| `GET` `PATCH` `DELETE` | `/skills/{name}` | one skill |
+| `GET` `POST` | `/plugins` | plugins |
+| `POST` | `/plugins/{name}/test` | dry-run with sample args |
+| `GET` | `/db` | the store + the setup SQL to paste into Supabase |
+| `POST` | `/db/query` | `{sql, params?}` — postgres backends only |
+
+### `GET /health` — deliberately open
+
+```json
+{
+  "ok": true, "status": "healthy", "service": "agent_linux",
+  "uptime_s": 412, "sessions": 1, "active": "pty-…-1", "max_sessions": 8,
+  "build_root": "/app/build", "port": 3100, "public_url": null,
+  "auth_required": true,
+  "agentbox": { "configured": true, "providers": ["env"], "model": "llama-3.3-70b" },
+  "store":    { "backend": "file", "table": "nova_docs", "configured": true },
+  "browser":  { "playwright": true, "running": false, "enabled": true }
+}
+```
+
+---
+
+## Connection & configuration
+
+### Both sides of the link
+
 ```bash
-NOVA_STORE_BACKEND=supabase
-NOVA_STORE_URL=https://<project>.supabase.co
-NOVA_STORE_KEY=<service_role key>
+# ── the terminal host ────────────────────────────────────────────
+AGENT_LINUX_TOKEN=<shared secret>       # gates root shells. Set it.
+AGENT_LINUX_PORT=3100                   # its own port
+AGENT_LINUX_HOST=0.0.0.0                # 127.0.0.1 for a loopback-only box
+AGENT_LINUX_BUILD_ROOT=/app/build       # where shells start
 
-# or one DSN, which also gives the agent a real `sql` tool:
-NOVA_STORE_BACKEND=postgres
-NOVA_STORE_URL=postgresql://user:pass@host/db
-NOVA_STORE_READONLY=1     # optional: the sql tool becomes SELECT-only
+# ── the client (your app) ────────────────────────────────────────
+AGENT_LINUX_URL=http://terminal-host:3100   # unset = in-process shells
+AGENT_LINUX_TOKEN=<same secret>
 ```
 
-The table is created on first use by the postgres backend; for Supabase REST,
-`GET /agent/extensions/db` returns the exact setup SQL to paste into the editor.
-A redeploy wipes a container's disk — a database is how your skills and servers
-survive it.
-
-### The extension API, in one place
-
-```
-GET    /agent/extensions                 what is installed, and on which backend
-GET    /agent/extensions/tools           every extra tool the agent would see
-GET    /agent/extensions/catalogue       ready-made examples for every section
-
-GET/POST/DELETE /agent/extensions/mcp[/{id}]
-POST   /agent/extensions/mcp/{id}/test | /toggle
-
-GET/POST /agent/extensions/skills        PATCH/DELETE /agent/extensions/skills/{name}
-POST   /agent/extensions/skills/upload   (.md or .zip)
-
-GET/POST /agent/extensions/plugins       PATCH/DELETE /agent/extensions/plugins/{name}
-POST   /agent/extensions/plugins/upload  (.json, or .py on a code-enabled host)
-POST   /agent/extensions/plugins/{name}/test
-
-GET    /agent/extensions/db              the store + the setup SQL
-POST   /agent/extensions/db/query        one statement (postgres backends)
-```
-
-Nothing in this surface ever echoes a secret: API keys, tokens and auth headers
-come back masked, and a plugin's code is returned only on a host that already
-allows it to run.
-
-## The live browser — one Chromium, two drivers
-
-The agent's browser tools act on a **real Chromium page the user is watching**,
-in the same console pane. That sharing is the whole point: an agent browsing in
-a private headless session is a black box, whereas here you can watch it work,
-take over mid-task, or fix the one field it got wrong.
-
-Install it on a host that wants it (it is not in the base requirements):
+### Agent
 
 ```bash
+AGENT_LINUX_AGENTBOX_BASE_URL=https://api.groq.com/openai/v1
+AGENT_LINUX_AGENTBOX_API_KEY=gsk_…
+AGENT_LINUX_AGENTBOX_MODEL=llama-3.3-70b-versatile
+AGENT_LINUX_AGENTBOX_MAX_STEPS=8        # tool-call budget per task
+AGENT_LINUX_AGENTBOX_STEP_TIMEOUT=120   # seconds per tool call
+```
+
+### Full reference
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `AGENT_LINUX_TOKEN` | *(empty)* | Shared secret. **Empty = open root shell.** Only sane on loopback. |
+| `AGENT_LINUX_PORT` | `3100` → `$PORT` → `3101` | Bind port. Free hosts inject `$PORT`; that is honoured. |
+| `AGENT_LINUX_HOST` | `0.0.0.0` | Bind address. |
+| `AGENT_LINUX_PUBLIC_URL` | *(empty)* | Cosmetic; echoed in `/health`. |
+| `AGENT_LINUX_URL` | *(empty)* | Client side: reach a terminal hosted elsewhere. |
+| `AGENT_LINUX_BUILD_ROOT` | `/app/build` | Workspace. Point at persistent storage. |
+| `AGENT_LINUX_AGENTBOX_*` | *(empty)* | Model endpoint, key, model, steps, timeout, provider file. |
+| `AGENT_LINUX_STORE_BACKEND` | `file` | `file` · `supabase` · `postgres` |
+| `AGENT_LINUX_STORE_URL` | *(empty)* | Project URL or `postgresql://…` DSN. |
+| `AGENT_LINUX_STORE_KEY` | *(empty)* | Supabase service key. |
+| `AGENT_LINUX_STORE_TABLE` | `nova_docs` | Document table. |
+| `AGENT_LINUX_STORE_READONLY` | `0` | Make the `sql` tool SELECT-only. |
+| `AGENT_LINUX_MCP_SERVERS` | *(empty)* | JSON array of MCP servers baked in at deploy. |
+| `AGENT_LINUX_PLUGINS_ALLOW_CODE` | `0` | Allow python plugins (same trust as the shell). |
+
+**Legacy names still work.** `NOVA_TERMINAL_TOKEN`, `NOVA_TERMINAL_PORT`,
+`NOVA_BUILD_ROOT`, `NOVA_AGENTBOX_*`, `NOVA_STORE_*` and the rest are read with a
+deprecation warning. See [Renaming](#renaming-from-novarouter).
+
+---
+
+## Setup
+
+### Local, from source
+
+```bash
+git clone <your-repo> && cd agent_linux/..
+
+# The package must be importable as `agent_linux`, so run from its parent.
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r agent_linux/requirements.txt
+
+# Optional extras
 pip install playwright && python3 -m playwright install --with-deps chromium
+pip install asyncpg                     # only for the postgres store backend
+
+AGENT_LINUX_TOKEN=$(openssl rand -hex 24) \
+AGENT_LINUX_PORT=3100 \
+python3 -m agent_linux.service
 ```
 
-Without it, every browser route answers `browser_unavailable` with the install
-command, `/health` reports `browser.playwright: false`, and nothing else in the
-terminal changes. That is deliberate: a browser is ~400 MB of Chromium that many
-free hosts cannot carry, and the terminal's promise is that `terminal/` runs
-anywhere with three Python packages.
+Then open **http://127.0.0.1:3100/** — the console asks for the token once and
+keeps it in `localStorage`.
 
-### The user's side
+> Use `python3 -m agent_linux.service`, not `python3 agent_linux/service.py`.
+> The `-m` form puts the *parent* directory on `sys.path`, which is what the
+> `agent_linux.*` imports need. The directory must be named `agent_linux`.
 
-Switch the left pane to **browser** (or `Alt+B`). You get an address bar, back,
-reload, launch/stop, scroll buttons, a type-into-page box, and the live view —
-click the page to click there, wheel to scroll. Frames arrive over SSE as base64
-JPEG, roughly one every 700 ms, and **only when the page actually changed**, so
-an idle page costs nothing.
+Or let the launcher do it: `sh agent_linux/run.sh`
 
-### The agent's side
+### Docker
 
-Eight tools, all acting on that same page:
+```bash
+cd agent_linux
+docker build -t agent-linux .
+docker run -p 3100:3100 \
+  -e AGENT_LINUX_TOKEN=$(openssl rand -hex 24) \
+  -e AGENT_LINUX_AGENTBOX_BASE_URL=https://api.groq.com/openai/v1 \
+  -e AGENT_LINUX_AGENTBOX_API_KEY=… \
+  -v agent_linux_build:/data \
+  -e AGENT_LINUX_BUILD_ROOT=/data/build \
+  agent-linux
+```
 
-| Tool | What it does |
+### Docker Compose (with a persistent workspace)
+
+```bash
+cd agent_linux
+AGENT_LINUX_TOKEN=$(openssl rand -hex 24) docker compose -f deploy/compose.yaml up -d
+```
+
+### First five minutes
+
+```bash
+# 1. Is it alive?
+curl -s localhost:3100/health | python3 -m json.tool
+
+# 2. Open a shell and run something
+curl -s -H "X-Nova-Terminal-Token: $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"command":"whoami && uname -a"}' \
+     localhost:3100/terminal/pty/run
+
+# 3. Add a model provider, then ask the agent something
+curl -s -H "X-Nova-Terminal-Token: $TOKEN" -H 'content-type: application/json' \
+  -d '{"id":"groq","base_url":"https://api.groq.com/openai/v1",
+       "api_key":"gsk_…","model":"llama-3.3-70b-versatile"}' \
+  localhost:3100/agent/providers
+
+curl -s -H "X-Nova-Terminal-Token: $TOKEN" -H 'content-type: application/json' \
+  -d '{"message":"what is running on this box?"}' \
+  localhost:3100/agent/chat
+
+# 4. Verify a deployment end to end
+BASE=https://your-host TOKEN=$TOKEN sh deploy/smoke.sh
+```
+
+### Giving the agent capabilities
+
+```bash
+# An MCP server — its tools join the agent's toolbox automatically
+curl -s -H "X-Nova-Terminal-Token: $TOKEN" -H 'content-type: application/json' \
+  -d '{"id":"fetch","transport":"stdio","command":"npx",
+       "args":["-y","@modelcontextprotocol/server-fetch"]}' \
+  localhost:3100/agent/extensions/mcp
+curl -s -XPOST -H "X-Nova-Terminal-Token: $TOKEN" \
+  localhost:3100/agent/extensions/mcp/fetch/test
+
+# A skill — instructions the agent loads only when a task matches
+curl -s -H "X-Nova-Terminal-Token: $TOKEN" \
+  -F file=@./release-notes.md localhost:3100/agent/extensions/skills/upload
+
+# A plugin — a declarative HTTP tool, no code executed on the host
+curl -s -H "X-Nova-Terminal-Token: $TOKEN" -H 'content-type: application/json' \
+  -d '{"name":"notify-slack","description":"Post to Slack",
+       "parameters":{"type":"object","properties":{"text":{"type":"string"}},
+                     "required":["text"]},
+       "request":{"method":"POST","url":"${env.SLACK_WEBHOOK_URL}",
+                  "body":{"text":"${text}"}}}' \
+  localhost:3100/agent/extensions/plugins
+```
+
+Or do all of it in the console: **⧉** in the topbar opens the extensions drawer,
+with an **Examples** tab whose buttons fill the forms for you.
+
+### Connecting a database
+
+```bash
+# Supabase (REST — no driver to install)
+AGENT_LINUX_STORE_BACKEND=supabase
+AGENT_LINUX_STORE_URL=https://<project>.supabase.co
+AGENT_LINUX_STORE_KEY=<service_role key>
+# then paste the setup SQL from: GET /agent/extensions/db
+
+# Or one DSN — which also gives the agent a real `sql` tool
+AGENT_LINUX_STORE_BACKEND=postgres
+AGENT_LINUX_STORE_URL=postgresql://user:pass@host/db
+AGENT_LINUX_STORE_READONLY=1
+```
+
+Without either, everything still works — the `file` backend keeps MCP servers,
+skills and plugins beside the workspace. A redeploy wipes a container's disk,
+which is the one thing a database buys you.
+
+---
+
+## Deploy
+
+`deploy/README.md` is the full decision table (checked against vendor pricing).
+The short version: **every free container host spins down when nobody is
+looking**, which is the opposite of what a shell needs.
+
+| Pick | Why |
 | --- | --- |
-| `browser_open` | Navigate (a real page load, not a fetch) |
-| `browser_read` | Title, URL, visible text, **and the interactive elements** with their text/name/id |
-| `browser_click` | By CSS selector, by visible text, or by viewport coordinates |
-| `browser_type` | Into a field or into focus, optionally pressing Enter |
-| `browser_scroll` | By pixels, or to the top/bottom |
-| `browser_eval` | Run JS and get JSON back — the scraping escape hatch |
-| `browser_screenshot` | Save the frame into the workspace and return the path |
+| **Hugging Face Spaces** (`cpu-basic`) | 🥇 The only free tier that does **not** sleep after 15 minutes — Spaces pause after 48 h. `/data` survives restarts. → `deploy/hf-space/` |
+| **Fly.io** (~$2–3/mo) | 💰 The honest answer once it matters: always-on, persistent volume, `auto_stop_machines = false`. → `deploy/fly.toml` |
+| **Render** (free) | 750 h/mo, no card, but 15-minute sleep. → `deploy/render.yaml` |
+| **Your own VPS** | Full control, persistent volume. → `deploy/compose.yaml` |
+| **Cloud Run / Lambda** | ❌ Wrong shape — request-billed, scales to zero, kills long-lived SSE shells. |
 
-`browser_read` returning the element list is the detail that makes the agent
-useful rather than lucky: it can see that a button says *Sign in* and click it
-by text, instead of guessing a selector that does not exist.
+One caveat worth repeating: **Playwright does not fit on a small free tier.**
+Chromium plus its dependencies is ~400 MB. If you want the browser on a free
+host, use Spaces (`cpu-basic` has the headroom); elsewhere the agent still works
+and only the browser is unavailable.
 
-### Routes
+---
 
+## Security model
+
+**This service hands out root shells. Treat the token as you would an SSH key.**
+
+| Control | Behaviour |
+| --- | --- |
+| `AGENT_LINUX_TOKEN` | Gates everything except `/health`, `/` and `/static/console.js`. Compared exactly; a missing token is a `401` with `code: unauthorized`. |
+| No token set | Only sane on loopback. The service prints a loud warning block at boot, and `/health` reports `auth_required: false`. |
+| Secrets never echoed | Provider keys, MCP headers/env and plugin auth headers are returned **masked** (`sk-l…bcd`). A plugin's code is returned only on a host that already allows it to run. |
+| `${env.NAME}` | Plugin and MCP credentials are templated from the deployment's environment, so a token never enters the model's context or a stored document. |
+| Python plugins | Off unless `AGENT_LINUX_PLUGINS_ALLOW_CODE=1`. Same trust level as the shell, which is exactly why it is opt-in — an upload must not become RCE by accident. |
+| Store keys | Never logged. `/health` reports the backend and table, never the DSN or key. |
+| Browser frame stream | The one route that accepts `?token=`, because `EventSource` cannot send a header. Read-only, and a page the token holder can already drive. |
+| Idle browser | Closed after 30 minutes (the health poll is the clock) and at shutdown. A forgotten Chromium is 400 MB of resident memory. |
+
+**Hardening checklist for anything public:**
+
+1. Set `AGENT_LINUX_TOKEN` to `openssl rand -hex 24` or longer.
+2. Put TLS in front (the platforms in `deploy/` all do).
+3. Set `AGENT_LINUX_STORE_READONLY=1` unless the agent genuinely needs to write.
+4. Leave `AGENT_LINUX_PLUGINS_ALLOW_CODE` unset.
+5. Remember the browser is a *logged-out* profile by design — it has no
+   persistent cookies, so it cannot silently act as you.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| `ModuleNotFoundError: No module named 'agent_linux'` | Run from the **parent** directory with `python3 -m agent_linux.service`, or set `PYTHONPATH=<parent>`. The directory must be named `agent_linux`. |
+| Everything answers `401` | The token does not match. It is compared exactly — check for a trailing newline in your shell export. |
+| `/agent/extensions` says `store_unavailable` | A DB backend is configured but unreachable. `/agent/extensions/db` reports the error; drop back to `file` to unblock. |
+| `agentbox_unconfigured` | No model provider. Set `AGENT_LINUX_AGENTBOX_BASE_URL`/`_API_KEY`, or `POST /agent/providers`. |
+| Browser routes answer `browser_unavailable` | Playwright is not installed: `pip install playwright && python3 -m playwright install --with-deps chromium`. |
+| Chromium fails to launch | Usually a missing shared library (`--with-deps` installs them) or a read-only `HOME`. |
+| Frames never arrive | The stream needs `?token=` — check the browser console for a 401 on `/agent/browser/stream`. |
+| Shell routes `404` | You are on a host that mounted the routes elsewhere. This build serves them at `/terminal/pty/*`; `GET /health` confirms the service is the one answering. |
+| `sql` says "the file store has no SQL" | Expected. Point `AGENT_LINUX_STORE_BACKEND=postgres` at a DSN to get it. |
+| A skill upload is rejected | Needs a `name` — either frontmatter `name:` or a filename that is a valid id (`[a-z0-9._-]`). |
+| MCP server `test` times out | stdio servers get 25 s to answer. First run of `npx -y …` downloads the package; retry once it is cached. |
+
+---
+
+## Renaming from NovaRouter
+
+The project was `NovaRouter`'s terminal, published as `terminal/`. It is
+**Agent_Linux**, published as `agent_linux/`. What that means for you:
+
+| Changed | Detail |
+| --- | --- |
+| Package directory | `terminal/` → `agent_linux/` |
+| Entry point | `python3 -m terminal.service` → `python3 -m agent_linux.service` |
+| Env prefix | `NOVA_*` → `AGENT_LINUX_*` |
+| Shell prompt | `~ Root@Build:` → `~ AgentLinux:` |
+| Docker image | `novarouter-terminal` → `agent-linux` |
+
+**Unchanged on purpose:**
+
+- **The URL prefix `/terminal/pty/*`.** It is an API contract. Anything already
+  pointed at this host — a dashboard, a script, a saved integration — keeps
+  working, and the package's own name appearing in a URL would be a leaky
+  abstraction anyway.
+- **The legacy env names.** `NOVA_TERMINAL_TOKEN` and friends are read forever,
+  with a deprecation warning. The token in particular is read from *both*
+  prefixes unconditionally, so a rename can never leave the service open.
+- **The store table name `nova_docs`.** Renaming it would orphan existing data.
+
+### Migrating
+
+```bash
+# 1. Move the directory
+git mv terminal agent_linux
+
+# 2. Rename your variables (both work, so you can do this at your leisure)
+sed -i 's/NOVA_TERMINAL_/AGENT_LINUX_/g; s/NOVA_AGENTBOX_/AGENT_LINUX_AGENTBOX_/g' .env
+
+# 3. Update your start command
+#    python3 -m terminal.service  →  python3 -m agent_linux.service
+
+# 4. Verify
+python3 -m agent_linux.service &
+curl -s localhost:3100/health | python3 -m json.tool
+sh deploy/smoke.sh
 ```
-GET  /agent/browser                 state: running, url, title, viewport, counters
-POST /agent/browser/start|stop|resize
-POST /agent/browser/navigate        {url, wait}
-POST /agent/browser/action          {action: click|type|press|scroll|back|goto}
-GET  /agent/browser/frame           one JPEG (image/jpeg, or 204 when busy)
-GET  /agent/browser/stream          SSE: `frame` (base64 jpeg), `state`, `error`
-```
 
-Two design notes worth knowing:
+Check `/health` → `env` for which prefix the process is actually running on, and
+watch the boot log for any `… is deprecated …` lines telling you what is left.
 
-- **One lock, one page.** Every action serialises on a single asyncio lock, so a
-  user's click and the agent's keystroke can never interleave halfway. A frame
-  request that arrives mid-action returns `204` rather than queueing — the client
-  keeps the last frame, which is better than a laggy live view.
-- **The frame stream takes the token in the query string.** `EventSource` cannot
-  send a header, and an `<img>` cannot either. It is a read-only stream of a page
-  the holder of that token can already drive, and it is the usual trade for a live
-  view. Every other browser route uses the normal header.
+---
 
-The browser is closed after 30 minutes of no activity (the health poll is the
-clock), and on shutdown — a forgotten Chromium is 400 MB of resident memory.
+## License
+
+MIT.

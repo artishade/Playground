@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ============================================================================ #
-# NovaRouter Terminal — Hugging Face Spaces build.
+# Agent_Linux Terminal — Hugging Face Spaces build.
 #
 # Copy this package to the Space root and use this file as `Dockerfile`. Two
 # deviations from the generic image, both because of how Spaces works:
@@ -30,13 +30,13 @@ WORKDIR /app
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
-COPY . /app/terminal
+COPY . /app/agent_linux
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    NOVA_BUILD_ROOT=/data/build \
-    NOVA_TERMINAL_PORT=7860 \
-    NOVA_TERMINAL_HOST=0.0.0.0 \
+    AGENT_LINUX_BUILD_ROOT=/data/build \
+    AGENT_LINUX_PORT=7860 \
+    AGENT_LINUX_HOST=0.0.0.0 \
     HOME=/data
 
 EXPOSE 7860

@@ -8,8 +8,8 @@
 # POSIX sh (dash-safe): no pipefail, no [[ ]], no source.
 set -eu
 
-BASE="${BASE:-http://127.0.0.1:${NOVA_TERMINAL_PORT:-3100}}"
-TOKEN="${TOKEN:-${NOVA_TERMINAL_TOKEN:-}}"
+BASE="${BASE:-http://127.0.0.1:${AGENT_LINUX_PORT:-3100}}"
+TOKEN="${TOKEN:-${AGENT_LINUX_TOKEN:-}}"
 AUTH=""
 # `if`, not `[ … ] && …`: the `&&` form returns 1 when TOKEN is empty, which
 # under `set -e` would abort the script before the first check.

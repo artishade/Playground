@@ -23,7 +23,7 @@ pushed over the *same* SSE connection as shell output — one stream, one clock.
     GET    /agent/browser/stream          SSE: a frame whenever the page changes
 
 Playwright is an **optional** dependency on purpose. The terminal's promise is
-that `terminal/` runs anywhere with three Python packages; a browser is 400 MB
+that `agent_linux/` runs anywhere with three Python packages; a browser is 400 MB
 of Chromium that many hosts cannot carry. So it degrades honestly: with no
 Playwright installed, every route answers `code: browser_unavailable` and says
 exactly how to install it — the rest of the terminal is untouched.
@@ -157,7 +157,7 @@ class BrowserSession:
                     viewport=self.viewport,
                     user_agent=(
                         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36 NovaRouter/2.2"
+                        "(KHTML, like Gecko) Chrome/125.0 Safari/537.36 Agent_Linux/2.2"
                     ),
                     ignore_https_errors=True,
                 )

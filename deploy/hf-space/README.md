@@ -1,5 +1,5 @@
 ---
-title: NovaRouter Terminal
+title: Agent_Linux Terminal
 emoji: 🖥️
 colorFrom: indigo
 colorTo: blue
@@ -10,7 +10,7 @@ license: mit
 short_description: Root cloud shell + AI agent, in one page.
 ---
 
-# NovaRouter Terminal on Hugging Face Spaces
+# Agent_Linux Terminal on Hugging Face Spaces
 
 The cheapest way to get a **permanently running** root shell for free: Spaces
 on `cpu-basic` are **not** stopped after 15 minutes of idleness — the platform
@@ -26,11 +26,11 @@ That is a different world from Render/SnapDeploy, which sleep in 15 minutes.
 
    | Name | Kind | Value |
    | --- | --- | --- |
-   | `NOVA_TERMINAL_TOKEN` | secret | `openssl rand -hex 24` — **do this**, a public Space URL with no token is an open root shell |
-   | `NOVA_BUILD_ROOT` | variable | `/data/build` (see below) |
-   | `NOVA_AGENTBOX_BASE_URL` | secret | e.g. `https://api.groq.com/openai/v1` |
-   | `NOVA_AGENTBOX_API_KEY` | secret | your key |
-   | `NOVA_AGENTBOX_MODEL` | variable | e.g. `llama-3.3-70b-versatile` |
+   | `AGENT_LINUX_TOKEN` | secret | `openssl rand -hex 24` — **do this**, a public Space URL with no token is an open root shell |
+   | `AGENT_LINUX_BUILD_ROOT` | variable | `/data/build` (see below) |
+   | `AGENT_LINUX_AGENTBOX_BASE_URL` | secret | e.g. `https://api.groq.com/openai/v1` |
+   | `AGENT_LINUX_AGENTBOX_API_KEY` | secret | your key |
+   | `AGENT_LINUX_AGENTBOX_MODEL` | variable | e.g. `llama-3.3-70b-versatile` |
 
 4. Open the Space. The console asks for the token once and keeps it locally.
 
@@ -39,7 +39,7 @@ That is a different world from Render/SnapDeploy, which sleep in 15 minutes.
 - **Port**: Spaces routes traffic to `app_port` (7860 here). The service reads
   `$PORT`, so nothing else is needed.
 - **Ephemeral disk**: a free Space's filesystem is wiped on every rebuild. The
-  `NOVA_BUILD_ROOT=/data/build` above points the workspace at `/data`, which
+  `AGENT_LINUX_BUILD_ROOT=/data/build` above points the workspace at `/data`, which
   survives restarts within a Space but *not* a factory rebuild. For anything you
   care about, `git push` it or mount real storage.
 - **CPU**: `cpu-basic` is 2 vCPU / 16 GB RAM shared — plenty for shells and

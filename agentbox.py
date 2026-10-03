@@ -3,7 +3,7 @@
 A terminal hosted on its own is useless without a mind behind it: you want to
 type "deploy the site and tail the log", not just get a root prompt. Agentbox
 is that mind, and it lives in the terminal host — so **deploying only
-`terminal/` gives you the shells *and* the agent**, with no NovaRouter gateway,
+`agent_linux/` gives you the shells *and* the agent**, with no Agent_Linux gateway,
 no database and no dashboard involved.
 
     POST /agent/chat        {message, provider?, model?, history?} → the answer
@@ -14,10 +14,10 @@ The page that uses all of it — session tabs, a real shell, this agent — is
 `web/console.html`, served by the host at `/`.
 
 It talks to any OpenAI-compatible `/v1/chat/completions` endpoint — the free
-NovaFree engine, OpenAI, Groq, OpenRouter, a self-hosted vLLM, or a NovaRouter
+NovaFree engine, OpenAI, Groq, OpenRouter, a self-hosted vLLM, or a Agent_Linux
 gateway's own `/v1`. Providers come from two places:
 
-  environment   NOVA_AGENTBOX_BASE_URL / _API_KEY / _MODEL  (id: `env`)
+  environment   AGENT_LINUX_AGENTBOX_BASE_URL / _API_KEY / _MODEL  (id: `env`)
   runtime       POST /agent/providers, saved to a private file next to the
                 workspace — so you can add Grok, OpenRouter and a local vLLM
                 side by side and pick one per chat
@@ -52,18 +52,18 @@ from . import store as store_module
 from .link import TerminalError, current
 from .pty import agent_label
 
-log = logging.getLogger("terminal.agentbox")
+log = logging.getLogger("agent_linux.agentbox")
 
 router = APIRouter()
 
 CALL_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=60.0, pool=30.0)
 MAX_TOOL_OUTPUT = 8000
 REPLY_HISTORY = 12          # messages kept per conversation
-ENV_PROVIDER_ID = "env"     # the provider built from NOVA_AGENTBOX_* variables
+ENV_PROVIDER_ID = "env"     # the provider built from AGENT_LINUX_AGENTBOX_* variables
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 REGISTRY_LOCK = threading.Lock()   # the registry is a tiny file; keep writes sane
 
-SYSTEM_PROMPT = """You are Agentbox, the AI agent inside a NovaRouter terminal.
+SYSTEM_PROMPT = """You are Agentbox, the AI agent inside a Agent_Linux terminal.
 
 You are working inside a real Linux shell on the user's machine. Every tool
 call you make is typed into a live terminal tab the user can watch, so:
@@ -820,7 +820,7 @@ def agentbox_configured_response() -> JSONResponse | None:
         return None
     return JSONResponse(
         {
-            "error": "Agentbox has no provider. Set NOVA_AGENTBOX_BASE_URL on this "
+            "error": "Agentbox has no provider. Set AGENT_LINUX_AGENTBOX_BASE_URL on this "
                      "terminal host, or add one: POST /agent/providers.",
             "code": "agentbox_unconfigured",
         },
@@ -932,7 +932,7 @@ async def chat(request: Request):
     # The step budget ran out — say so honestly instead of pretending it worked.
     return JSONResponse(
         {"error": f"the agent hit its {config.AGENTBOX_MAX_STEPS}-step budget; "
-                  "raise NOVA_AGENTBOX_MAX_STEPS or ask for something smaller.",
+                  "raise AGENT_LINUX_AGENTBOX_MAX_STEPS or ask for something smaller.",
          "code": "agentbox_budget_exhausted", "steps": steps},
         status_code=200,
     )

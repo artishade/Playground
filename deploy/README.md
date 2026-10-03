@@ -47,7 +47,7 @@ Two facts decide it:
    `apt install`-ed tools and your workspace are still there tomorrow.
 
 The cost is that a Space is **public by default**. On a root shell that is not a
-nuisance, it is a security incident — so `NOVA_TERMINAL_TOKEN` is mandatory
+nuisance, it is a security incident — so `AGENT_LINUX_TOKEN` is mandatory
 there, and setting the Space private is the better move.
 
 → `deploy/hf-space/README.md` + `deploy/hf-space/Dockerfile`
@@ -96,10 +96,10 @@ The image adapts to its host instead of the other way round:
 
 | Variable | Why |
 | --- | --- |
-| `PORT` / `NOVA_TERMINAL_PORT` | free hosts inject `$PORT` and route the public URL at it; the service prefers an explicit `NOVA_TERMINAL_PORT`, then `$PORT`, then 3100 |
-| `NOVA_TERMINAL_HOST` | `0.0.0.0` (default) for a hosted box; `127.0.0.1` for a loopback-only deploy behind your own proxy |
-| `NOVA_BUILD_ROOT` | point it at the host's persistent path (`/data/build` on Spaces, `/data/build` on Fly with a volume) so the workspace is not wiped on redeploy |
-| `NOVA_TERMINAL_PUBLIC_URL` | cosmetic; echoed in `/health` so you can tell which deployment answered |
+| `PORT` / `AGENT_LINUX_PORT` | free hosts inject `$PORT` and route the public URL at it; the service prefers an explicit `AGENT_LINUX_PORT`, then `$PORT`, then 3100 |
+| `AGENT_LINUX_HOST` | `0.0.0.0` (default) for a hosted box; `127.0.0.1` for a loopback-only deploy behind your own proxy |
+| `AGENT_LINUX_BUILD_ROOT` | point it at the host's persistent path (`/data/build` on Spaces, `/data/build` on Fly with a volume) so the workspace is not wiped on redeploy |
+| `AGENT_LINUX_PUBLIC_URL` | cosmetic; echoed in `/health` so you can tell which deployment answered |
 
 `/health` is the probe everything can use, and it is deliberately open:
 
@@ -110,15 +110,15 @@ curl -s https://your-host/health | jq
 
 ## Always: the token
 
-The service hands out **root shells**. `NOVA_TERMINAL_TOKEN` is the line between
+The service hands out **root shells**. `AGENT_LINUX_TOKEN` is the line between
 a private box and a public one, and an unset token is only sane on loopback — the
 service shouts about it at boot for exactly this reason. Generate one and set it
 on both sides:
 
 ```bash
 openssl rand -hex 24
-# host:  NOVA_TERMINAL_TOKEN=<value>
-# app:   NOVA_TERMINAL_URL=https://your-host   NOVA_TERMINAL_TOKEN=<value>
+# host:  AGENT_LINUX_TOKEN=<value>
+# app:   AGENT_LINUX_URL=https://your-host   AGENT_LINUX_TOKEN=<value>
 ```
 
 The console asks for it once and keeps it in `localStorage`; every API call

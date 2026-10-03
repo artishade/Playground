@@ -1,15 +1,15 @@
 """Pluggable persistence — files by default, Supabase/Postgres when you want it.
 
-The terminal's whole selling point is that `terminal/` runs on its own with **no
+The terminal's whole selling point is that `agent_linux/` runs on its own with **no
 database**. That promise cannot be broken by a feature, so this module inverts
 the usual design: persistence is an interface with a zero-dependency default,
 and every cloud backend is opt-in.
 
-    NOVA_STORE_BACKEND   file | supabase | postgres   (default: file)
-    NOVA_STORE_URL       DSN or project URL
-    NOVA_STORE_KEY       service key (Supabase) / password is in the DSN
-    NOVA_STORE_TABLE     document table name (default: nova_docs)
-    NOVA_STORE_READONLY  1 → the agent's `sql` tool may only SELECT
+    AGENT_LINUX_STORE_BACKEND   file | supabase | postgres   (default: file)
+    AGENT_LINUX_STORE_URL       DSN or project URL
+    AGENT_LINUX_STORE_KEY       service key (Supabase) / password is in the DSN
+    AGENT_LINUX_STORE_TABLE     document table name (default: nova_docs)
+    AGENT_LINUX_STORE_READONLY  1 → the agent's `sql` tool may only SELECT
 
 What lives in the store: MCP servers, skills, plugins, provider overrides. They
 are **documents** (a key + a JSON value), because that is the one shape every
@@ -38,7 +38,9 @@ from typing import Any, Protocol
 
 import httpx
 
-log = logging.getLogger("terminal.store")
+from . import env
+
+log = logging.getLogger("agent_linux.store")
 
 # Keys are path segments on the file backend and query values on REST, so they
 # are constrained once, here, and every caller inherits the guarantee.
@@ -166,7 +168,7 @@ class FileStore:
     async def sql(self, statement: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
         # Honest refusal beats a fake table: the file backend has no SQL.
         raise StoreUnavailable(
-            "the file store has no SQL. Set NOVA_STORE_BACKEND=postgres "
+            "the file store has no SQL. Set AGENT_LINUX_STORE_BACKEND=postgres "
             "(Neon/Supabase/Railway) to give the agent a queryable database."
         )
 
@@ -243,7 +245,7 @@ class SupabaseStore:
         # instead of pretending an RPC function exists.
         raise StoreUnavailable(
             "the supabase REST backend cannot run arbitrary SQL; point "
-            "NOVA_STORE_BACKEND=postgres at the same database (the DSN is in "
+            "AGENT_LINUX_STORE_BACKEND=postgres at the same database (the DSN is in "
             "Project settings → Database) to give the agent SQL access."
         )
 
@@ -267,7 +269,7 @@ class SupabaseStore:
             if res.status_code == 404:
                 raise StoreError(
                     f"supabase has no table '{self.table}' — create it first "
-                    "(see terminal/store.py for the schema)"
+                    "(see agent_linux/store.py for the schema)"
                 )
             raise StoreError(f"supabase HTTP {res.status_code}: {detail}")
         return res
@@ -291,7 +293,7 @@ class PostgresStore:
 
     def __init__(self, dsn: str, table: str = DEFAULT_TABLE, readonly: bool = False):
         if not dsn:
-            raise StoreUnavailable("postgres needs a DSN in NOVA_STORE_URL")
+            raise StoreUnavailable("postgres needs a DSN in AGENT_LINUX_STORE_URL")
         self.dsn = dsn
         self.table = re.sub(r"[^a-zA-Z0-9_]", "", table or DEFAULT_TABLE) or DEFAULT_TABLE
         self.readonly = readonly
@@ -305,7 +307,7 @@ class PostgresStore:
         except ImportError as err:
             raise StoreUnavailable(
                 "the postgres backend needs asyncpg: pip install asyncpg "
-                "(or use NOVA_STORE_BACKEND=supabase, which needs no driver)"
+                "(or use AGENT_LINUX_STORE_BACKEND=supabase, which needs no driver)"
             ) from err
         return asyncpg
 
@@ -393,7 +395,7 @@ class PostgresStore:
         if self.readonly:
             first = text.lstrip("( \n\t").split(None, 1)[0].lower()
             if first not in ("select", "with", "show", "explain", "table"):
-                raise StoreError("this store is read-only (NOVA_STORE_READONLY=1)")
+                raise StoreError("this store is read-only (AGENT_LINUX_STORE_READONLY=1)")
         if ";" in text:
             raise StoreError("one statement per call — send them separately")
         pool = await self._ensure()
@@ -427,15 +429,15 @@ _STORE_LOCK = threading.Lock()
 
 def describe() -> dict[str, Any]:
     """What the store is, for /health — never the DSN, never the key."""
-    backend = (os.environ.get("NOVA_STORE_BACKEND") or "").strip().lower()
-    url = os.environ.get("NOVA_STORE_URL", "")
+    backend = env.get("STORE_BACKEND").strip().lower()
+    url = env.get("STORE_URL")
     if not backend:
         backend = "postgres" if url else "file"
     info: dict[str, Any] = {
         "backend": backend,
-        "table": os.environ.get("NOVA_STORE_TABLE") or DEFAULT_TABLE,
+        "table": env.get("STORE_TABLE") or DEFAULT_TABLE,
         "configured": backend == "file" or bool(url),
-        "readonly": os.environ.get("NOVA_STORE_READONLY") in ("1", "true", "yes"),
+        "readonly": env.flag("STORE_READONLY"),
     }
     if url and backend == "supabase":
         # A project URL is not a secret; the key is, and never appears here.
@@ -449,11 +451,11 @@ def get_store() -> Store:
     with _STORE_LOCK:
         if _STORE is not None:
             return _STORE
-        backend = (os.environ.get("NOVA_STORE_BACKEND") or "").strip().lower()
-        url = (os.environ.get("NOVA_STORE_URL") or "").strip()
-        key = (os.environ.get("NOVA_STORE_KEY") or "").strip()
-        table = os.environ.get("NOVA_STORE_TABLE") or DEFAULT_TABLE
-        readonly = os.environ.get("NOVA_STORE_READONLY") in ("1", "true", "yes")
+        backend = env.get("STORE_BACKEND").strip().lower()
+        url = env.get("STORE_URL").strip()
+        key = env.get("STORE_KEY").strip()
+        table = env.get("STORE_TABLE") or DEFAULT_TABLE
+        readonly = env.flag("STORE_READONLY")
 
         if not backend:
             backend = "postgres" if url else "file"
@@ -466,7 +468,7 @@ def get_store() -> Store:
             _STORE = PostgresStore(url, table, readonly)
         else:
             raise StoreUnavailable(
-                f"unknown NOVA_STORE_BACKEND '{backend}' — use file, supabase or postgres"
+                f"unknown AGENT_LINUX_STORE_BACKEND '{backend}' — use file, supabase or postgres"
             )
         log.info("store: %s backend selected%s", _STORE.kind, " (read-only)" if readonly else "")
         return _STORE

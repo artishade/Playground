@@ -15,7 +15,7 @@ Two transports, because both are common in the wild:
 A server is a document in the store, so it can be added from the console, from
 curl, or baked in from the environment:
 
-    NOVA_MCP_SERVERS   JSON array of server objects (deployer-baked, id `env`)
+    AGENT_LINUX_MCP_SERVERS   JSON array of server objects (deployer-baked, id `env`)
 
 Tools are namespaced `mcp__<server>__<tool>` before the model ever sees them, so
 two servers can both expose `search` without a collision — and so a tool call
@@ -34,12 +34,13 @@ from typing import Any
 
 import httpx
 
+from . import env
 from .store import StoreError, get_store, valid_key
 
 log = logging.getLogger("terminal.mcp")
 
 PROTOCOL_VERSION = "2024-11-05"
-CLIENT_INFO = {"name": "novarouter-terminal", "version": "2.1.0"}
+CLIENT_INFO = {"name": "agent_linux", "version": "2.2.0"}
 
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 # `__` is the separator because MCP tool names may contain single underscores,
@@ -148,14 +149,14 @@ def _public(server: dict[str, Any], tools: list[dict[str, Any]] | None = None) -
 
 
 def _env_servers() -> dict[str, dict[str, Any]]:
-    """Servers baked in by the deployer: NOVA_MCP_SERVERS='[{...}]'."""
-    raw = (os.environ.get("NOVA_MCP_SERVERS") or "").strip()
+    """Servers baked in by the deployer: AGENT_LINUX_MCP_SERVERS='[{...}]'."""
+    raw = env.get("MCP_SERVERS").strip()
     if not raw:
         return {}
     try:
         parsed = json.loads(raw)
     except ValueError as err:
-        log.warning("NOVA_MCP_SERVERS is not valid JSON (%s) — ignoring it", err)
+        log.warning("AGENT_LINUX_MCP_SERVERS is not valid JSON (%s) — ignoring it", err)
         return {}
     if not isinstance(parsed, list):
         return {}
@@ -192,7 +193,7 @@ async def load_servers() -> dict[str, dict[str, Any]]:
 
 async def save_server(server: dict[str, Any]) -> dict[str, Any]:
     if server.get("source") == "env":
-        raise ValueError("servers baked in from NOVA_MCP_SERVERS cannot be edited over the API")
+        raise ValueError("servers baked in from AGENT_LINUX_MCP_SERVERS cannot be edited over the API")
     await get_store().put(_doc_key(server["id"]), server)
     return server
 
@@ -203,7 +204,7 @@ async def delete_server(server_id: str) -> bool:
     if existing is None:
         return False
     if existing.get("source") == "env":
-        raise ValueError("servers baked in from NOVA_MCP_SERVERS cannot be deleted over the API")
+        raise ValueError("servers baked in from AGENT_LINUX_MCP_SERVERS cannot be deleted over the API")
     return await get_store().delete(_doc_key(server_id))
 
 

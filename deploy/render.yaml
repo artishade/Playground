@@ -9,27 +9,27 @@
 # deploy/README.md.
 services:
   - type: web
-    name: novarouter-terminal
+    name: agent-linux
     runtime: docker
     plan: free
     region: singapore          # or oregon / frankfurt — pick the one nearest you
-    dockerfilePath: ./terminal/Dockerfile
-    dockerContext: ./terminal
+    dockerfilePath: ./agent_linux/Dockerfile
+    dockerContext: ./agent_linux
     healthCheckPath: /health
     autoDeploy: true
     envVars:
       # Shared secret. Without it anyone who finds the URL gets a root shell.
       # Render generates a strong value; copy it into the app side too.
-      - key: NOVA_TERMINAL_TOKEN
+      - key: AGENT_LINUX_TOKEN
         generateValue: true
-      - key: NOVA_BUILD_ROOT
+      - key: AGENT_LINUX_BUILD_ROOT
         value: /app/build
       # The agent's brain — any OpenAI-compatible /v1 endpoint. Leave unset and
       # Agentbox stays off (the console says so) until you add a provider in the
       # UI. Point it at Groq's free tier to have an agent on day one.
-      - key: NOVA_AGENTBOX_BASE_URL
+      - key: AGENT_LINUX_AGENTBOX_BASE_URL
         sync: false
-      - key: NOVA_AGENTBOX_API_KEY
+      - key: AGENT_LINUX_AGENTBOX_API_KEY
         sync: false
-      - key: NOVA_AGENTBOX_MODEL
+      - key: AGENT_LINUX_AGENTBOX_MODEL
         sync: false

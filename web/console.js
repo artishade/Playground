@@ -1,5 +1,5 @@
 /**
- * NovaRouter terminal console — the standalone workspace client.
+ * Agent_Linux terminal console — the standalone workspace client.
  *
  * One page for a terminal that may be hosted with nothing else: the shell tabs
  * on the left, Agentbox on the right, providers manageable in place. It talks
@@ -156,12 +156,12 @@
   function askToken() {
     if (typeof prompt !== 'function') return '';
     const token = prompt('This terminal host requires its shared secret\n(NOVA_TERMINAL_TOKEN):', state.token || '');
-    if (token) store.set('nova_terminal_token', token);
+    if (token) store.set('agent_linux_token', token);
     return token || '';
   }
 
   function rememberToken() {
-    state.token = store.get('nova_terminal_token', '');
+    state.token = store.get('agent_linux_token', '');
   }
 
   // ---- theme ---------------------------------------------------------------
@@ -177,7 +177,7 @@
       screen.term.options.theme = TERM_THEMES[state.theme];
       screen.term.refresh && screen.term.refresh(0, state.rows);
     }
-    store.set('nova_terminal_theme', state.theme);
+    store.set('agent_linux_theme', state.theme);
   }
 
   // ---- the shell screen ----------------------------------------------------
@@ -1418,7 +1418,7 @@
 
   async function boot() {
     rememberToken();
-    applyTheme(store.get('nova_terminal_theme', 'obsidian'));
+    applyTheme(store.get('agent_linux_theme', 'obsidian'));
     wire();
     buildTerminal();
     setLink(null, 'linking');
@@ -1436,7 +1436,7 @@
     global.setInterval(ping, 45000);
   }
 
-  const NovaTerminalConsole = {
+  const AgentLinuxConsole = {
     state, screen, api, json, askToken, headers, toast, applyTheme, ping,
     loadSessions, renderTabs, select, attach, onChunk,
     newSession, closeSession, renameSession, renameActive, send, postResize, buildTerminal,
@@ -1446,7 +1446,7 @@
     browser, showView, browserState, browserStart, browserStop, browserGo, browserAction,
   };
 
-  global.NovaTerminalConsole = NovaTerminalConsole;
+  global.AgentLinuxConsole = AgentLinuxConsole;
   if (global.document && global.document.addEventListener) {
     global.document.addEventListener('DOMContentLoaded', boot);
   }

@@ -1,26 +1,26 @@
-"""NovaRouter terminal service — the Root@Build terminal, hosted on its own.
+"""Agent_Linux terminal service — the Root@Build terminal, hosted on its own.
 
-The interactive terminal is the one part of NovaRouter that wants its own
+The interactive terminal is the one part of Agent_Linux that wants its own
 machine: it hands out real root shells, so it can be sized, restarted and
 network-isolated independently of the gateway. This module is that separate
-host, and it is the only entrypoint you need if you deploy `terminal/` alone:
+host, and it is the only entrypoint you need if you deploy `agent_linux/` alone:
 
-    python3 -m terminal.service        # binds 0.0.0.0:$NOVA_TERMINAL_PORT
-    sh ./terminal/run.sh               # same thing, with dependency install
+    python3 -m agent_linux.service        # binds 0.0.0.0:$AGENT_LINUX_TERMINAL_PORT
+    sh ./agent_linux/run.sh               # same thing, with dependency install
 
 It serves exactly the routes the dashboard already calls (the same
-`terminal/api.py` the gateway mounts), plus `/agent/*` for Agentbox, so
+`agent_linux/api.py` the gateway mounts), plus `/agent/*` for Agentbox, so
 pointing the app at it changes nothing about the UI or the API contract:
 
-    NOVA_TERMINAL_URL=http://terminal-host:3100   # on the NovaRouter side
-    NOVA_TERMINAL_TOKEN=<shared secret>           # on BOTH sides
+    AGENT_LINUX_TERMINAL_URL=http://terminal-host:3100   # on the Agent_Linux side
+    AGENT_LINUX_TERMINAL_TOKEN=<shared secret>           # on BOTH sides
 
-NOVA_TERMINAL_URL unset (the default) means the gateway keeps the terminal
-in-process and this module is simply not run. See `terminal/link.py` for
+AGENT_LINUX_TERMINAL_URL unset (the default) means the gateway keeps the terminal
+in-process and this module is simply not run. See `agent_linux/link.py` for
 the seam, and `agent-ctx/project-map.md` for the operational notes.
 
 This host is self-contained: it imports nothing from `nova/`, needs no
-database, and ships its own Agentbox (`terminal/agentbox.py`) so a separately
+database, and ships its own Agentbox (`agent_linux/agentbox.py`) so a separately
 hosted terminal still comes with the AI agent.
 """
 from __future__ import annotations
@@ -34,11 +34,11 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from terminal import link as terminal_link
-from terminal.agentbox import agentbox_status
-from terminal.agentbox import router as agentbox_router
-from terminal.api import router as terminal_api_router
-from terminal.config import (
+from agent_linux import link as terminal_link
+from agent_linux.agentbox import agentbox_status
+from agent_linux.agentbox import router as agentbox_router
+from agent_linux.api import router as terminal_api_router
+from agent_linux.config import (
     PACKAGE_ROOT,
     TERMINAL_PUBLIC_URL,
     TERMINAL_SERVICE_HOST,
@@ -46,12 +46,13 @@ from terminal.config import (
     TERMINAL_SERVICE_TOKEN,
     build_root,
 )
-from terminal.extensions import router as extensions_router
-from terminal.browser_api import router as browser_router
-from terminal.store import describe as store_describe
+from agent_linux.extensions import router as extensions_router
+from agent_linux.browser_api import router as browser_router
+from agent_linux.env import describe as env_describe
+from agent_linux.store import describe as store_describe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("terminal.service")
+log = logging.getLogger("agent_linux.service")
 
 STARTED_AT = time.time()
 
@@ -59,14 +60,14 @@ STARTED_AT = time.time()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # This process always owns its shells: pin the local link so a stray
-    # NOVA_TERMINAL_URL in the environment can't make the service proxy to
+    # AGENT_LINUX_TERMINAL_URL in the environment can't make the service proxy to
     # itself (or to a second copy of itself).
     terminal_link.pin(terminal_link.LocalLink())
     try:
         await terminal_link.current().ensure_default()
     except Exception as err:  # never block boot on the warmup shell
         log.warning("default cloud shell warmup skipped: %s", err)
-    log.info("NovaRouter terminal service up on %s:%s (root of %s)",
+    log.info("Agent_Linux terminal service up on %s:%s (root of %s)",
              TERMINAL_SERVICE_HOST, TERMINAL_SERVICE_PORT, PACKAGE_ROOT)
     yield
     try:
@@ -74,7 +75,7 @@ async def lifespan(_app: FastAPI):
     except Exception as err:
         log.warning("shell teardown reported: %s", err)
     try:
-        from terminal.browser import SESSION
+        from agent_linux.browser import SESSION
 
         await SESSION.stop()
     except Exception as err:                      # noqa: BLE001 — shutdown is best-effort
@@ -82,7 +83,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="NovaRouter Terminal Service",
+    title="Agent_Linux Terminal Service",
     version="2.0.0-python",
     lifespan=lifespan,
     docs_url="/api/docs",
@@ -109,7 +110,7 @@ def _browser_report() -> dict[str, Any]:
         installed = importlib.util.find_spec("playwright") is not None
     except Exception:                             # noqa: BLE001
         installed = False
-    from terminal.browser import SESSION
+    from agent_linux.browser import SESSION
 
     running = False
     try:
@@ -144,7 +145,7 @@ app.include_router(terminal_api_router, prefix="/terminal/pty", tags=["terminal"
 # so the host serves its own page at `/` (see the route below).
 
 # Agentbox — the AI agent that ships with the terminal. It is mounted here and
-# not in terminal/api.py on purpose: a gateway serves its own agent already
+# not in agent_linux/api.py on purpose: a gateway serves its own agent already
 # (/api/agent/*), so the two never compete for the same routes.
 app.include_router(agentbox_router, prefix="/agent", tags=["agent"])
 
@@ -199,7 +200,7 @@ async def health():
     # A forgotten browser is 400 MB of Chromium; the health poll is the only
     # clock this service has, so the reaper rides it.
     try:
-        from terminal.browser import SESSION
+        from agent_linux.browser import SESSION
 
         await SESSION.reap_if_idle()
     except Exception:                             # noqa: BLE001
@@ -207,7 +208,7 @@ async def health():
     return JSONResponse({
         "ok": ok,
         "status": "healthy" if ok else "degraded",
-        "service": "novarouter-terminal",
+        "service": "agent_linux",
         "runtime": "python",
         "uptime_s": int(time.time() - STARTED_AT),
         "sessions": sessions,
@@ -220,23 +221,24 @@ async def health():
         "agentbox": agentbox_status(),
         "store": store_describe(),
         "browser": _browser_report(),
+        "env": env_describe(),
     })
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    # Only reachable as `python3 -m terminal.service`: the `-m` form puts the
+    # Only reachable as `python3 -m agent_linux.service`: the `-m` form puts the
     # repo root on sys.path, which is what the `terminal.*` imports above need.
     if not TERMINAL_SERVICE_TOKEN:
         log.warning("=" * 74)
-        log.warning("NOVA_TERMINAL_TOKEN is not set — this service grants root")
+        log.warning("AGENT_LINUX_TERMINAL_TOKEN is not set — this service grants root")
         log.warning("shells to anyone who can reach it. Set the same token on both")
         log.warning("sides before exposing it beyond loopback.")
         log.warning("=" * 74)
 
     # Binds 0.0.0.0 so it is reachable as its own host; PORT is never reused.
-    # NOVA_TERMINAL_HOST=127.0.0.1 makes a loopback-only deploy explicit, which
+    # AGENT_LINUX_TERMINAL_HOST=127.0.0.1 makes a loopback-only deploy explicit, which
     # is the sane way to run without a token behind a local reverse proxy.
     uvicorn.run(app, host=TERMINAL_SERVICE_HOST, port=TERMINAL_SERVICE_PORT,
                 log_level="info", access_log=False)

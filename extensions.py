@@ -39,7 +39,7 @@ from fastapi.responses import JSONResponse
 
 from . import mcp, plugins, skills, store
 
-log = logging.getLogger("terminal.extensions")
+log = logging.getLogger("agent_linux.extensions")
 
 router = APIRouter()
 
@@ -195,7 +195,7 @@ async def toggle_mcp(server_id: str, request: Request):
     if server is None:
         return fail(f"no MCP server '{server_id}'", "mcp_not_found", 404)
     if server.get("source") == "env":
-        return fail("servers baked in from NOVA_MCP_SERVERS cannot be toggled over the API",
+        return fail("servers baked in from AGENT_LINUX_MCP_SERVERS cannot be toggled over the API",
                     "env_server", 409)
     server["enabled"] = bool(body.get("enabled", not server.get("enabled")))
     try:
@@ -483,11 +483,11 @@ async def db_info():
             ");"
         ),
         "env": {
-            "NOVA_STORE_BACKEND": "file | supabase | postgres",
-            "NOVA_STORE_URL": "https://<project>.supabase.co  — or a postgres:// DSN",
-            "NOVA_STORE_KEY": "supabase service_role key (not needed for a DSN)",
-            "NOVA_STORE_TABLE": "nova_docs",
-            "NOVA_STORE_READONLY": "1 to make the agent's sql tool SELECT-only",
+            "AGENT_LINUX_STORE_BACKEND": "file | supabase | postgres",
+            "AGENT_LINUX_STORE_URL": "https://<project>.supabase.co  — or a postgres:// DSN",
+            "AGENT_LINUX_STORE_KEY": "supabase service_role key (not needed for a DSN)",
+            "AGENT_LINUX_STORE_TABLE": "nova_docs",
+            "AGENT_LINUX_STORE_READONLY": "1 to make the agent's sql tool SELECT-only",
         },
         "notes": [
             "file is the default: no database, works everywhere, lives beside the workspace.",
@@ -602,7 +602,7 @@ async def catalogue():
         },
         "plugin_python_example": (
             "def run(args):\n"
-            "    # NOVA_PLUGINS_ALLOW_CODE=1 required on the host.\n"
+            "    # AGENT_LINUX_PLUGINS_ALLOW_CODE=1 required on the host.\n"
             "    name = args.get('name', 'world')\n"
             "    return {'output': f'hello {name}'}\n"
         ),
