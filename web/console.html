@@ -417,6 +417,48 @@ kbd { font: 9.5px var(--mono); border: 1px solid var(--line-2); border-bottom-wi
 .orb.bad { background: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--err) 60%, transparent); }
 .orb.bad::after { background: color-mix(in srgb, var(--err) 30%, transparent); }
 
+/* --------------------------------------------------- reasoning (live AI thinking) */
+.msg.reasoning {
+  border-style: solid;
+  border-color: color-mix(in srgb, var(--acc1) 32%, var(--line));
+  background: linear-gradient(160deg,
+    color-mix(in srgb, var(--acc1) 10%, var(--panel)),
+    color-mix(in srgb, var(--acc2) 6%, var(--panel)));
+}
+.msg.reasoning::before { background: var(--grad); }
+.think-status { display: flex; align-items: center; gap: 10px;
+                font: 500 11.5px var(--mono); color: var(--dim); }
+.think-line {
+  background: linear-gradient(90deg, var(--dim) 20%, var(--fg) 50%, var(--dim) 80%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 2.2s linear infinite;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.msg.reasoning.done .think-line { background: none; -webkit-text-fill-color: var(--acc3);
+                                  color: var(--acc3); animation: none; }
+.think-trace { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.think-trace details.step { margin: 0; }
+.think-label { font: 700 9px var(--mono); letter-spacing: .14em; color: var(--dim-2);
+               text-transform: uppercase; margin-bottom: 6px; }
+
+/* ---------------------------------------------------------- composer (expanded) */
+.composer-wrap {
+  flex: none; border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-3) 45%, transparent);
+}
+form#composer { border-top: 0; padding: 9px 12px 6px; align-items: flex-end; gap: 9px; }
+#input {
+  min-height: 84px; max-height: 240px; line-height: 1.55;
+  padding: 10px 12px;
+}
+.composer-meta { display: flex; align-items: center; gap: 9px; padding: 0 14px 10px; }
+.composer-meta .tagx { flex: none; }
+.composer-meta .hint { padding: 0; flex: 1; min-width: 0; overflow: hidden;
+                       text-overflow: ellipsis; white-space: nowrap; }
+.cm-keys { flex: none; white-space: nowrap; color: var(--dim-2); }
+
 /* --------------------------------------------------------- live browser */
 .seg {
   display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -660,12 +702,52 @@ pre.out {
   }
   body.agent-open aside { transform: none; }
   #paneToggle, #closePane { display: inline-flex; }
-  .topbar { gap: 7px; padding: 0 10px; }
+  .topbar { gap: 7px; padding: 0 10px; height: auto; min-height: 46px; flex-wrap: wrap; padding-block: 8px; }
   .brand small, .brand .ver { display: none; }
   #where { max-width: 14ch; }
   .statusbar { padding: 0 10px; gap: 10px; }
+  #tabs { padding: 7px 10px; gap: 6px; }
+  .tab { max-width: 46vw; padding: 6px 8px 6px 10px; }
+  .tab em { max-width: 9ch; }
+  #screen { padding: 10px 6px 10px 10px; }
+  #log { padding: 12px 11px 8px; gap: 9px; }
+  .msg { padding: 10px 11px; border-radius: 12px; }
+  .msg .copy { opacity: 1; }              /* hover nai mobile e — always show */
+  .bfoot .hint, .cm-keys { display: none; }
+  .bbar { flex-wrap: wrap; }
+  .bbar input { min-width: 0; }
+  .bmeta .tagx { max-width: 30ch; }
+  #browserView { padding: 8px 10px 10px; }
+  .subbar { flex-wrap: wrap; }
+  /* topbar er shesh e agent pane er notun ekta quick action row */
+  .topbar .grow { display: none; }
+  .topbar { justify-content: flex-start; }
+  .topbar .pill, .topbar select, .topbar button { flex: 0 0 auto; }
 }
-@media (max-width: 620px) { .hide-sm { display: none !important; } }
+@media (max-width: 620px) {
+  .hide-sm { display: none !important; }
+  :root { --radius: 12px; }
+  .topbar { padding: 8px; gap: 6px; }
+  .mark { width: 26px; height: 26px; border-radius: 8px; }
+  .brand b { font-size: 11.5px; letter-spacing: .1em; }
+  .pill { padding: 4px 8px; font-size: 10px; }
+  button, select { padding: 7px 10px; font-size: 11.5px; border-radius: 9px; }
+  button.icon { padding: 7px 8px; }
+  .statusbar { height: 26px; font-size: 9.5px; gap: 8px; }
+  #input { min-height: 72px; }
+  .msg { font-size: 12px; }
+  details.step { font-size: 11px; }
+  .msg pre.codeblock { font-size: 10.5px; padding: 8px 10px; }
+  .empty .box, .bempty .box { padding: 20px 16px; margin: 0 10px; }
+  .drawer-body { padding: 16px 12px 40px; }
+  .drawer .tabs { padding: 8px 10px 0; }
+  .cards { grid-template-columns: 1fr; }
+  .think-status { font-size: 10.5px; }
+}
+/* tall-keyboard phones: composer sticks to the visible bottom */
+@media (max-width: 900px) and (display-mode: standalone) {
+  aside { padding-bottom: env(safe-area-inset-bottom, 0); }
+}
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -835,11 +917,18 @@ pre.out {
         </form>
       </div>
       <div class="hint" id="agentHint">Every command the agent runs appears in a shell tab you can watch.</div>
-      <form id="composer">
-        <textarea id="input" rows="1" aria-label="message to the agent"
-          placeholder="deploy the site and tail the log…  (↵ to send)"></textarea>
-        <button type="submit" class="primary" title="send">↑</button>
-      </form>
+      <div class="composer-wrap">
+        <form id="composer">
+          <textarea id="input" rows="1" aria-label="message to the agent"
+            placeholder="describe the task — the agent plans, runs commands and reports back…"></textarea>
+          <button type="submit" class="primary" title="send">↑</button>
+        </form>
+        <div class="composer-meta">
+          <span class="tagx" id="cmState">ready</span>
+          <span class="hint" id="cmHint">↵ send · shift+↵ newline</span>
+          <span class="tagx" id="cmChars">0</span>
+        </div>
+      </div>
     </aside>
   </div>
 </div>

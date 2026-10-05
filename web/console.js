@@ -152,6 +152,58 @@
     return () => el.remove();
   }
 
+  /**
+   * A visible reasoning card: what the agent is doing right now, a live tool
+   * trace that grows as steps land, and a timer. Returns handles to steer it.
+   */
+  function sayReasoning(label) {
+    const box = $('log');
+    if (!box) return { el: null, remove() {}, step() {}, done() {} };
+    const el = document.createElement('div');
+    el.className = 'msg reasoning';
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = 'AGENTBOX · reasoning';
+    const status = document.createElement('div');
+    status.className = 'think-status';
+    const line = document.createElement('span');
+    line.className = 'think-line';
+    line.textContent = label || 'analysing the task…';
+    const timer = document.createElement('span');
+    timer.className = 'tagx';
+    timer.textContent = '0.0s';
+    const t0 = Date.now();
+    const tick = setInterval(() => { timer.textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's'; }, 100);
+    status.append(line, timer);
+    const trace = document.createElement('div');
+    trace.className = 'think-trace';
+    el.append(who, status, trace);
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+    return {
+      el,
+      /** Log one tool step into the live trace. */
+      step(stepObj) {
+        trace.appendChild(stepCard(stepObj));
+        line.textContent = stepObj.tool === 'run_command' && stepObj.args && stepObj.args.command
+          ? `ran: ${String(stepObj.args.command).slice(0, 80)}`
+          : `called ${stepObj.tool || 'a tool'}`;
+        box.scrollTop = box.scrollHeight;
+      },
+      /** Freeze the timer and mark the card resolved. */
+      done(ok) {
+        clearInterval(tick);
+        el.classList.add('done');
+        line.textContent = ok === false ? 'ran into a problem — see below' : 'done — assembling the answer';
+        box.scrollTop = box.scrollHeight;
+      },
+      remove() {
+        clearInterval(tick);
+        el.remove();
+      },
+    };
+  }
+
   // ---- transport -----------------------------------------------------------
 
   function headers(extra) {
@@ -619,22 +671,24 @@
 
   async function ask(message) {
     say('YOU', message, 'you');
-    const clearThinking = sayThinking();
+    setComposerState('working');
+    const think = sayReasoning('analysing the task…');
     const { status, body } = await json(`${AGENT}/chat`, {
       method: 'POST',
       body: JSON.stringify({ message, history: state.history, provider: state.provider || undefined }),
     });
-    clearThinking();
     if (status !== 200 || !body.ok) {
+      think.done(false);
       const text = body.error || `HTTP ${status}`;
       say('AGENTBOX', text, 'err');
       toast(text, 'err');
+      setComposerState('ready');
       return;
     }
-    const box = $('log');
-    (body.steps || []).forEach((step) => {
-      if (box) { box.appendChild(stepCard(step)); box.scrollTop = box.scrollHeight; }
-    });
+    // Steps stream into the reasoning trace as they arrive — the thinking is
+    // visible, not hidden behind a spinner.
+    (body.steps || []).forEach((step) => { think.step(step); });
+    think.done(true);
     const reply = say('AGENTBOX', body.reply || '(no reply)', 'bot');
     if (reply) {
       const copy = document.createElement('button');
@@ -648,6 +702,7 @@
       reply.appendChild(copy);
     }
     state.history.push({ role: 'user', content: message }, { role: 'assistant', content: body.reply || '' });
+    setComposerState('ready');
     loadSessions();   // its commands opened tabs — show them
   }
 
@@ -1983,10 +2038,32 @@
   function autosize(el) {
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+    el.style.height = Math.min(el.scrollHeight, 240) + 'px';
+  }
+
+  /** Composer meta row: busy state + char count. */
+  function setComposerState(mode) {
+    const tag = $('cmState');
+    const input = $('input');
+    const send = document.querySelector('#composer button[type="submit"]');
+    if (tag) {
+      tag.textContent = mode === 'working' ? 'thinking…' : 'ready';
+      tag.classList.toggle('acc', mode === 'working');
+    }
+    if (send) send.disabled = mode === 'working';
+    if (mode === 'working' && input) input.placeholder = 'the agent is working — you can keep typing…';
+    else if (input) input.placeholder = 'describe the task — the agent plans, runs commands and reports back…';
+  }
+
+  function wireComposerMeta() {
+    const input = $('input');
+    if (!input) return;
+    const chars = $('cmChars');
+    on(input, 'input', () => { if (chars) chars.textContent = String(input.value.length); });
   }
 
   function wire() {
+    wireComposerMeta();
     on($('new'), 'click', newSession);
     on($('rename'), 'click', renameActive);
     on($('kill'), 'click', () => {
@@ -2191,8 +2268,9 @@
     state, screen, api, json, askToken, headers, toast, applyTheme, ping,
     loadSessions, renderTabs, select, attach, onChunk,
     newSession, closeSession, renameSession, renameActive, send, postResize, buildTerminal,
-    loadProviders, renderProviders, saveProvider, ask, boot, say, sayThinking, renderLite,
+    loadProviders, renderProviders, saveProvider, ask, boot, say, sayThinking, sayReasoning, renderLite,
     paletteOpen, paletteClose, paletteRender, paletteCommands,
+    setComposerState, wireComposerMeta,
     ext, loadExtensions, loadMcp, loadSkills, loadPlugins, loadDb, loadCatalogue,
     showPane, uploadSkillFile, runDbQuery,
     cred, loadCredentials, showCredPane,
