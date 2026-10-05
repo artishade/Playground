@@ -1,5 +1,5 @@
 /**
- * Agent_Linux terminal console — the standalone workspace client.
+ * Agent_Linux terminal console — the standalone workspace client · skin v2.
  *
  * One page for a terminal that may be hosted with nothing else: the shell tabs
  * on the left, Agentbox on the right, providers manageable in place. It talks
@@ -11,8 +11,10 @@
  * is not, because a terminal that renders nothing the moment jsdelivr is
  * blocked is not a terminal. Both accept the same keystrokes.
  *
- * The UI layer (theme, toasts, latency, shortcuts, mobile pane) is deliberately
- * dependency-free: no framework, no build step, one file.
+ * v2 additions: boot splash, command palette (Ctrl+K), draggable agent-pane
+ * resizer with a persisted width, statusbar, typing indicator, richer agent
+ * messages and code blocks. The UI layer stays dependency-free: no framework,
+ * no build step, one file.
  */
 (function (global) {
   'use strict';
@@ -83,6 +85,13 @@
     if (label && text) label.textContent = text;
   }
 
+  function setAgentOrb(ok) {
+    const orb = $('adot');
+    if (!orb) return;
+    orb.classList.toggle('bad', ok === false);   // harmless if unsupported
+    orb.classList.toggle('on', ok === true);
+  }
+
   function say(who, text, cls) {
     const box = $('log');
     if (!box) return null;
@@ -93,6 +102,7 @@
     label.textContent = who;
     el.appendChild(label);
     const body = document.createElement('span');
+    body.className = 'body';
     body.innerHTML = cls === 'bot' || cls === 'you' ? renderLite(text) : escapeHtml(text);
     el.appendChild(body);
     box.appendChild(el);
@@ -116,12 +126,30 @@
     let html = '';
     parts.forEach((chunk, i) => {
       if (i % 2 === 1) {
-        html += '<pre style="margin:8px 0;overflow:auto;white-space:pre-wrap">' + escapeHtml(chunk.replace(/^\w*\n/, '')) + '</pre>';
+        html += '<pre class="codeblock">' + escapeHtml(chunk.replace(/^\w*\n/, '')) + '</pre>';
       } else {
-        html += escapeHtml(chunk).replace(/`([^`\n]+)`/g, '<code style="opacity:.85">$1</code>');
+        html += escapeHtml(chunk).replace(/`([^`\n]+)`/g, '<code>$1</code>');
       }
     });
     return html;
+  }
+
+  /** A live "working" bubble with breathing dots; returns a remove() fn. */
+  function sayThinking() {
+    const box = $('log');
+    if (!box) return () => {};
+    const el = document.createElement('div');
+    el.className = 'msg bot';
+    const who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = 'AGENTBOX · working';
+    const body = document.createElement('span');
+    body.className = 'body';
+    body.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
+    el.append(who, body);
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+    return () => el.remove();
   }
 
   // ---- transport -----------------------------------------------------------
@@ -213,7 +241,7 @@
         cursorStyle: 'bar',
         fontSize: 13,
         lineHeight: 1.25,
-        fontFamily: 'ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, Consolas, monospace',
+        fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         scrollback: 5000,
         allowProposedApi: true,
         theme: TERM_THEMES[state.theme],
@@ -350,6 +378,21 @@
     if (newBtn) newBtn.disabled = state.sessions.length >= (state.max || 8);
   }
 
+  function updateStatusbar() {
+    const here = state.sessions.find((s) => s.id === state.active);
+    const left = $('sbSession');
+    if (left) {
+      left.textContent = here
+        ? `${here.label || here.id}${here.cwd ? ' · ' + here.cwd : ''}`
+        : 'no shell focused';
+    }
+    const prov = $('sbProv');
+    if (prov) prov.textContent = state.provider ? 'agent: ' + state.provider : 'agent: —';
+    const lat = $('sbLat');
+    const top = $('latency');
+    if (lat && top) lat.textContent = top.textContent;
+  }
+
   function select(id) {
     if (!id) return;
     state.active = id;
@@ -362,6 +405,7 @@
     const hint = $('where');
     if (hint) hint.textContent = here ? (here.cwd || '') : '';
     renderEmptyState();
+    updateStatusbar();
   }
 
   function renderEmptyState() {
@@ -414,6 +458,7 @@
       if (hint) hint.textContent = data.cwd;
       const here = state.sessions.find((s) => s.id === (data.session || state.active));
       if (here) { here.cwd = data.cwd; renderTabs(); }
+      updateStatusbar();
     }
     if (data.done) {
       say('TERMINAL', `session ended (exit ${data.exit == null ? 0 : data.exit})`);
@@ -437,6 +482,7 @@
     if (state.active === id) { state.active = null; state.offset = 0; screen.clear(); }
     await loadSessions();
     if (body && body.ok) toast('shell closed');
+    updateStatusbar();
   }
 
   function renameSession(session) {
@@ -464,16 +510,20 @@
       const ms = Math.round(((global.performance && performance.now) ? performance.now() : Date.now()) - started);
       const el = $('latency');
       if (el) el.textContent = ms + ' ms';
+      const lat = $('sbLat');
+      if (lat) lat.textContent = ms + ' ms';
       const hint = $('agentHint');
       if (hint && body && body.agentbox) {
         hint.textContent = body.agentbox.configured
           ? 'Every command the agent runs appears in a shell tab you can watch.'
           : 'No model provider configured yet — open ⚙ to add one (any OpenAI-compatible endpoint).';
       }
+      setAgentOrb(!!(body.agentbox && body.agentbox.configured));
     } catch (err) {
       const el = $('latency');
       if (el) el.textContent = 'offline';
       setLink(false, 'offline');
+      setAgentOrb(false);
     }
   }
 
@@ -501,6 +551,7 @@
     const dot = $('adot');
     if (dot) dot.classList.toggle('bad', !state.providers.length);
     renderChips();
+    updateStatusbar();
   }
 
   function renderProviders(body) {
@@ -568,13 +619,12 @@
 
   async function ask(message) {
     say('YOU', message, 'you');
-    const pending = say('AGENTBOX', 'thinking…', 'bot');
-    if (pending) pending.querySelector('.who').textContent = 'AGENTBOX · working';
+    const clearThinking = sayThinking();
     const { status, body } = await json(`${AGENT}/chat`, {
       method: 'POST',
       body: JSON.stringify({ message, history: state.history, provider: state.provider || undefined }),
     });
-    if (pending) pending.remove();
+    clearThinking();
     if (status !== 200 || !body.ok) {
       const text = body.error || `HTTP ${status}`;
       say('AGENTBOX', text, 'err');
@@ -622,6 +672,172 @@
     toast(`provider ${body.provider.id} saved`, 'ok');
   }
 
+  // ---- command palette -----------------------------------------------------
+
+  const palette = {
+    open: false,
+    index: 0,
+    items: [],
+  };
+
+  function paletteCommands() {
+    const cmds = [
+      { icon: '＋', label: 'New shell', hint: 'Alt+T', run: () => newSession() },
+      { icon: '⟳', label: 'Clear terminal view', hint: 'Alt+K', run: () => screen.clear() },
+      { icon: '⌨', label: 'Rename focused shell', hint: 'Alt+R', run: () => renameActive() },
+      { icon: '✕', label: 'Kill focused shell', hint: 'Alt+W', run: () => state.active ? closeSession(state.active) : toast('no focused shell', 'err') },
+      { icon: '◐', label: 'Toggle agent pane', hint: 'Alt+A', run: () => document.body.classList.toggle('agent-open') },
+      { icon: '⧉', label: 'Extensions drawer', hint: 'MCP · skills · plugins', run: () => { const p = $('extPanel'); p.hidden = !p.hidden; if (!p.hidden) loadExtensions(); } },
+      { icon: '⚿', label: 'Credentials drawer', hint: 'SSH · accounts', run: () => { const p = $('credPanel'); p.hidden = !p.hidden; if (!p.hidden) loadCredentials(); } },
+      { icon: '⚙', label: 'Manage providers', hint: 'agent endpoints', run: () => { const box = $('providerBox'); box.hidden = !box.hidden; if (!box.hidden) loadProviders(); } },
+      { icon: '⌁', label: 'Open live browser', hint: 'Alt+B', run: () => showView(browser.view === 'browser' ? 'shell' : 'browser') },
+      { icon: '◍', label: 'Launch browser engine', run: () => { showView('browser'); browserStart(); } },
+    ];
+    THEMES.forEach((t) => {
+      cmds.push({
+        icon: '◑', label: `Theme: ${t}`,
+        hint: t === state.theme ? 'current' : '',
+        run: () => { applyTheme(t); toast(`theme: ${t}`, 'ok'); },
+      });
+    });
+    state.providers.forEach((p) => {
+      cmds.push({
+        icon: '◈', label: `Provider: ${p.label || p.id}`,
+        hint: p.id === state.provider ? 'active' : (p.model || ''),
+        run: () => {
+          state.provider = p.id;
+          const pick = $('provider');
+          if (pick) pick.value = p.id;
+          renderProviders({ providers: state.providers, registry: ($('registry') || {}).textContent });
+          updateStatusbar();
+          toast(`provider → ${p.id}`, 'ok');
+        },
+      });
+    });
+    state.sessions.filter((s) => !s.closed).forEach((s) => {
+      cmds.push({
+        icon: '›_', label: `Focus shell: ${s.label || s.id}`,
+        hint: s.cwd || '',
+        run: () => select(s.id),
+      });
+    });
+    return cmds;
+  }
+
+  function paletteRender(filter) {
+    const list = $('paletteList');
+    if (!list) return;
+    palette.items = paletteCommands();
+    const q = (filter || '').trim().toLowerCase();
+    if (q) {
+      palette.items = palette.items.filter((c) =>
+        c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q));
+    }
+    list.textContent = '';
+    palette.items.slice(0, 24).forEach((c, i) => {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pal-item' + (i === palette.index ? ' active' : '');
+      btn.innerHTML = `<span class="pal-ic">${escapeHtml(c.icon)}</span>` +
+        `<span class="pal-label">${escapeHtml(c.label)}</span>` +
+        (c.hint ? `<span class="pal-hint">${escapeHtml(c.hint)}</span>` : '');
+      btn.onclick = () => { paletteClose(); c.run(); };
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+    palette.index = Math.min(palette.index, Math.max(0, palette.items.length - 1));
+  }
+
+  function paletteOpen() {
+    const wrap = $('palette');
+    if (!wrap) return;
+    wrap.hidden = false;
+    palette.open = true;
+    palette.index = 0;
+    const input = $('paletteInput');
+    if (input) { input.value = ''; input.focus(); }
+    paletteRender('');
+  }
+
+  function paletteClose() {
+    const wrap = $('palette');
+    if (!wrap) return;
+    wrap.hidden = true;
+    palette.open = false;
+  }
+
+  function paletteMove(delta) {
+    if (!palette.items.length) return;
+    palette.index = (palette.index + delta + palette.items.length) % palette.items.length;
+    const list = $('paletteList');
+    const active = list && list.children[palette.index];
+    if (active) {
+      list.querySelectorAll('.pal-item').forEach((n, i) => n.classList.toggle('active', i === palette.index));
+      active.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  // ---- agent pane resizer --------------------------------------------------
+
+  function wireResizer() {
+    const grip = $('resizer');
+    if (!grip) return;
+    let startX = 0;
+    let startW = 0;
+    const MIN = 300;
+    const MAX = 720;
+    const begin = (e) => {
+      if (global.matchMedia && global.matchMedia('(max-width: 900px)').matches) return;
+      startX = e.clientX;
+      startW = document.querySelector('aside').getBoundingClientRect().width;
+      document.body.classList.add('resizing');
+      on(global, 'mousemove', move);
+      on(global, 'mouseup', end);
+      e.preventDefault();
+    };
+    const move = (e) => {
+      const w = Math.min(MAX, Math.max(MIN, startW - (e.clientX - startX)));
+      document.documentElement.style.setProperty('--agentw', w + 'px');
+      screen.fit();
+    };
+    const end = () => {
+      document.body.classList.remove('resizing');
+      global.removeEventListener('mousemove', move);
+      global.removeEventListener('mouseup', end);
+      const w = getComputedStyle(document.documentElement).getPropertyValue('--agentw').trim();
+      store.set('agent_linux_agentw', w);
+      postResize();
+    };
+    grip.addEventListener('mousedown', begin);
+    // Touch: same contract, one finger.
+    grip.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) return;
+      startX = e.touches[0].clientX;
+      startW = document.querySelector('aside').getBoundingClientRect().width;
+      document.body.classList.add('resizing');
+    }, { passive: true });
+    grip.addEventListener('touchmove', (e) => {
+      if (!document.body.classList.contains('resizing') || e.touches.length !== 1) return;
+      const w = Math.min(MAX, Math.max(MIN, startW - (e.touches[0].clientX - startX)));
+      document.documentElement.style.setProperty('--agentw', w + 'px');
+      screen.fit();
+    }, { passive: true });
+    grip.addEventListener('touchend', () => {
+      if (!document.body.classList.contains('resizing')) return;
+      document.body.classList.remove('resizing');
+      store.set('agent_linux_agentw', getComputedStyle(document.documentElement).getPropertyValue('--agentw').trim());
+      postResize();
+    });
+  }
+
+  function restorePaneWidth() {
+    const w = parseInt(store.get('agent_linux_agentw', ''), 10);
+    if (w >= 300 && w <= 720) {
+      document.documentElement.style.setProperty('--agentw', w + 'px');
+    }
+  }
+
   // ---- live browser --------------------------------------------------------
 
   const BROWSER = '/agent/browser';
@@ -645,6 +861,8 @@
     shellish.forEach((id) => { const el = $(id); if (el) el.hidden = browser.view === 'browser'; });
     const cwdPill = $('cwdPill');
     if (cwdPill) cwdPill.hidden = browser.view === 'browser';
+    const sb = document.querySelector('.statusbar');
+    if (sb) sb.hidden = false;
     const bv = $('browserView');
     if (bv) bv.hidden = browser.view !== 'browser';
     document.querySelectorAll('.segbtn').forEach((btn) => {
@@ -653,9 +871,9 @@
       btn.setAttribute('aria-selected', String(active));
     });
     if (browser.view === 'browser') {
-      screen.fit();                 // the xterm was hidden; re-fit on the way back
       ensureBrowserStream();
     } else {
+      screen.fit();                 // the xterm was hidden; re-fit on the way back
       screen.focus();
       postResize();
     }
@@ -968,9 +1186,9 @@
   }
 
   async function saveMcp(form) {
-    let headers, env;
+    let hdrs, env;
     try {
-      headers = jsonField($('m_headers').value, 'headers');
+      hdrs = jsonField($('m_headers').value, 'headers');
       env = jsonField($('m_env').value, 'env');
     } catch (err) { toast(err.message, 'err'); return; }
     const payload = {
@@ -979,7 +1197,7 @@
       url: $('m_url').value.trim(),
       command: $('m_command').value.trim(),
       args: $('m_args').value.trim(),
-      headers, env,
+      headers: hdrs, env,
     };
     const { status, body } = await json(`${EXT}/mcp`, { method: 'POST', body: JSON.stringify(payload) });
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
@@ -1783,6 +2001,7 @@
     on($('provider'), 'change', (e) => {
       state.provider = e.target.value;
       renderProviders({ providers: state.providers, registry: ($('registry') || {}).textContent });
+      updateStatusbar();
     });
     on($('theme'), 'change', (e) => applyTheme(e.target.value));
     on($('provForm'), 'submit', (e) => { e.preventDefault(); saveProvider(); });
@@ -1807,6 +2026,23 @@
     on($('paneToggle'), 'click', () => document.body.classList.toggle('agent-open'));
     on($('closePane'), 'click', () => document.body.classList.remove('agent-open'));
     on(global, 'resize', () => { screen.fit(); postResize(); });
+
+    // ---- command palette ---------------------------------------------------
+    on($('paletteBtn'), 'click', paletteOpen);
+    on($('paletteBackdrop'), 'click', paletteClose);
+    on($('paletteInput'), 'input', (e) => { palette.index = 0; paletteRender(e.target.value); });
+    on($('paletteInput'), 'keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); paletteMove(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); paletteMove(-1); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        const item = palette.items[palette.index];
+        if (item) { paletteClose(); item.run(); }
+      }
+    });
+
+    // ---- agent pane resizer ------------------------------------------------
+    wireResizer();
 
     // ---- live browser controls --------------------------------------------
     document.querySelectorAll('.segbtn').forEach((btn) => {
@@ -1840,7 +2076,7 @@
       if (!panel.hidden) loadExtensions();
     });
     on($('extClose'), 'click', () => { const p = $('extPanel'); if (p) p.hidden = true; });
-    document.querySelectorAll('.exttab').forEach((tab) => {
+    document.querySelectorAll('#extPanel .exttab').forEach((tab) => {
       on(tab, 'click', () => showPane(tab.dataset.pane));
     });
     on($('mcpForm'), 'submit', (e) => { e.preventDefault(); saveMcp(e.target); });
@@ -1889,6 +2125,14 @@
 
     // Shortcuts — Alt+… never collides with a shell running in the xterm.
     on(global, 'keydown', (e) => {
+      if (palette.open) {
+        if (e.key === 'Escape') { paletteClose(); return; }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.altKey) {
+        e.preventDefault();
+        palette.open ? paletteClose() : paletteOpen();
+        return;
+      }
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const key = e.key.toLowerCase();
       if (key === 'k') { e.preventDefault(); screen.clear(); }
@@ -1897,6 +2141,7 @@
       else if (key === 't') { e.preventDefault(); newSession(); }
       else if (key === 'b') { e.preventDefault(); showView(browser.view === 'browser' ? 'shell' : 'browser'); }
       else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('agent-open'); }
+      else if (key === 'p') { e.preventDefault(); palette.open ? paletteClose() : paletteOpen(); }
       else if (key === 'c') {
         e.preventDefault();
         if (!credPanel) return;
@@ -1909,11 +2154,15 @@
         if (live[idx]) { e.preventDefault(); select(live[idx].id); }
       }
     });
+    on(global, 'keydown', (e) => {
+      if (e.key === 'Escape' && palette.open) paletteClose();
+    });
   }
 
   async function boot() {
     rememberToken();
     applyTheme(store.get('agent_linux_theme', 'obsidian'));
+    restorePaneWidth();
     wire();
     buildTerminal();
     setLink(null, 'linking');
@@ -1929,21 +2178,34 @@
     ping();
     global.setInterval(loadSessions, 20000);
     global.setInterval(ping, 45000);
+    // Boot splash out — never trap the user behind it.
+    const splash = $('boot');
+    if (splash) {
+      splash.classList.add('out');
+      setTimeout(() => splash.remove(), 600);
+    }
+    updateStatusbar();
   }
 
   const AgentLinuxConsole = {
     state, screen, api, json, askToken, headers, toast, applyTheme, ping,
     loadSessions, renderTabs, select, attach, onChunk,
     newSession, closeSession, renameSession, renameActive, send, postResize, buildTerminal,
-    loadProviders, renderProviders, saveProvider, ask, boot, say,
+    loadProviders, renderProviders, saveProvider, ask, boot, say, sayThinking, renderLite,
+    paletteOpen, paletteClose, paletteRender, paletteCommands,
     ext, loadExtensions, loadMcp, loadSkills, loadPlugins, loadDb, loadCatalogue,
     showPane, uploadSkillFile, runDbQuery,
     cred, loadCredentials, showCredPane,
     browser, showView, browserState, browserStart, browserStop, browserGo, browserAction,
+    ensureBrowserStream,
   };
 
   global.AgentLinuxConsole = AgentLinuxConsole;
   if (global.document && global.document.addEventListener) {
-    global.document.addEventListener('DOMContentLoaded', boot);
+    if (global.document.readyState === 'loading') {
+      global.document.addEventListener('DOMContentLoaded', boot);
+    } else {
+      boot();
+    }
   }
 })(typeof window !== 'undefined' ? window : globalThis);
