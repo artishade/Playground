@@ -372,6 +372,15 @@ details.step[data-tool="run_command"] summary { color: var(--acc1); }
 .chip:hover { color: var(--fg); border-color: var(--acc2); border-style: solid;
               background: color-mix(in srgb, var(--acc2) 8%, transparent); }
 
+.local-engines { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
+.local-engines .engine { display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-3) 42%, transparent); font-size: 11.5px; }
+.local-engines .engine b { color: var(--acc2); }
+.local-engines .engine .meta { color: var(--dim); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-engines .engine button { padding: 4px 10px; font-size: 11px; }
+
 .providers { border-top: 1px solid var(--line); padding: 10px 12px; flex: none;
              background: color-mix(in srgb, var(--bg-3) 42%, transparent); }
 .providers[hidden] { display: none; }
@@ -907,6 +916,7 @@ pre.out {
       <div class="chips" id="chips" aria-label="suggested prompts"></div>
       <div class="providers" id="providerBox" hidden>
         <div class="list" id="provList"></div>
+        <div class="local-engines" id="localEngines"></div>
         <form id="provForm" class="stack">
           <input id="p_id" placeholder="id — groq, openrouter, local-vllm" aria-label="provider id" required>
           <input id="p_url" placeholder="base url — https://api.groq.com/openai/v1" aria-label="base url" required>

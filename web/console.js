@@ -581,12 +581,11 @@
 
   // ---- Agentbox ------------------------------------------------------------
 
-  async function loadProviders() {
+async function loadProviders() {
     const { status, body } = await json(`${AGENT}/providers`);
     if (status === 401 || !body || !body.providers) return;
     state.providers = body.providers;
     state.provider = body.active || (state.providers[0] && state.providers[0].id) || '';
-
     const pick = $('provider');
     if (pick) {
       pick.textContent = '';
@@ -600,10 +599,56 @@
       pick.hidden = state.providers.length < 2;
     }
     renderProviders(body);
+    loadLocalEngines();
     const dot = $('adot');
     if (dot) dot.classList.toggle('bad', !state.providers.length);
     renderChips();
     updateStatusbar();
+  }
+
+  // ---- local engines (privacy mode helpers) --------------------------------
+  async function loadLocalEngines() {
+    const box = $('localEngines');
+    if (!box) return;
+    const { body } = await json(`${AGENT}/local-engines`);
+    if (!body || !body.ok) return;
+    box.textContent = '';
+    (body.engines || []).forEach((e) => {
+      const row = document.createElement('div');
+      row.className = 'engine';
+      const name = document.createElement('b');
+      name.textContent = e.engine;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      const count = (e.models || []).length;
+      meta.textContent = e.configured
+        ? 'already configured'
+        : `${count} model${count === 1 ? '' : 's'} · ${e.models && e.models[0] ? e.models[0] : ''}`;
+      row.append(name, meta);
+      if (!e.configured) {
+        const add = document.createElement('button');
+        add.type = 'button';
+        add.textContent = 'add';
+        add.onclick = async () => {
+          const { status, body: saved } = await json(`${AGENT}/local-engines/add`, {
+            method: 'POST',
+            body: JSON.stringify({ engine: e.engine, base_url: e.base_url, model: (e.models || [])[0] || '' }),
+          });
+          if (status !== 200 || !saved.ok) {
+            toast((saved && saved.error) || 'could not add', 'err');
+            return;
+          }
+          toast(`${e.engine} added as a provider — prompts now stay on this machine`, 'ok');
+          loadProviders();
+        };
+        row.appendChild(add);
+      } else {
+        const done = document.createElement('span');
+        done.textContent = '✓';
+        row.appendChild(done);
+      }
+      box.appendChild(row);
+    });
   }
 
   function renderProviders(body) {

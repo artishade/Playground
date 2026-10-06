@@ -23,6 +23,8 @@ can never leave the service unauthenticated.
     AGENT_LINUX_AGENTBOX_MAX_STEPS      tool-call budget per task (default 8)
     AGENT_LINUX_AGENTBOX_STEP_TIMEOUT   seconds one tool call may take (default 120)
     AGENT_LINUX_AGENTBOX_PROVIDER_FILE  where saved providers live
+    AGENT_LINUX_AGENTBOX_SYSTEM_PROMPT  replace the agent's persona wholesale
+    AGENT_LINUX_PRIVACY_MODE            local endpoints only — prompts never leave
     AGENT_LINUX_STORE_BACKEND           file | supabase | postgres
     AGENT_LINUX_STORE_URL               project URL or postgres DSN
     AGENT_LINUX_STORE_KEY               supabase service key
@@ -128,6 +130,18 @@ AGENTBOX_MAX_STEPS = max(1, min(30, env.int_or("AGENTBOX_MAX_STEPS", 8)))
 AGENTBOX_STEP_TIMEOUT = env.int_or("AGENTBOX_STEP_TIMEOUT", 120)
 # Where the saved custom providers live. Empty = <workspace>/.agentbox-providers.json
 AGENTBOX_PROVIDER_FILE = env.get("AGENTBOX_PROVIDER_FILE")
+
+# The agent's persona, your way. Either set this to the full prompt text, or
+# leave it empty and drop the prompt into <workspace>/.agentbox-system-prompt —
+# either replaces the built-in one. prompts/security-operator.md ships a
+# security-professional persona to start from.
+AGENTBOX_SYSTEM_PROMPT = env.get("AGENTBOX_SYSTEM_PROMPT")
+
+# Privacy mode: when on, the agent refuses any provider whose endpoint is not
+# on this machine or its LAN — so prompts cannot reach a third party by
+# construction, not by policy. Off by default so existing cloud deployments
+# keep working. Env var: AGENT_LINUX_PRIVACY_MODE=1
+AGENTBOX_PRIVACY_MODE = env.flag("PRIVACY_MODE")
 
 
 def agentbox_configured() -> bool:

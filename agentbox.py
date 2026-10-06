@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -789,6 +790,166 @@ def registry_path():
     return config.build_root() / ".agentbox-providers.json"
 
 
+# --------------------------------------------------------------------------- #
+# Privacy mode — local endpoints only, by construction
+# --------------------------------------------------------------------------- #
+
+# Local engines that keep every prompt on this machine (or its LAN), by port.
+LOCAL_ENGINE_PORTS = (11434, 8000, 1234, 8080, 5000, 9997, 9998)
+
+_local_lan_cache: list[str] = []
+
+
+def _this_machine_addrs() -> list[str]:
+    """Every IP this host answers on — 127.0.0.1 plus any LAN addresses."""
+    global _local_lan_cache
+    if _local_lan_cache:
+        return _local_lan_cache
+    addrs: list[str] = ["127.0.0.1", "::1", "localhost"]
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, proto=socket.IPPROTO_TCP):
+            addr = (info[4] or ("",))[0]
+            if addr and addr not in addrs:
+                addrs.append(addr)
+    except OSError:
+        pass
+    # A route-based probe: where do we egress if we talk to the internet?
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.settimeout(1.0)
+            probe.connect(("8.8.8.8", 80))
+            addrs.append(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    _local_lan_cache = addrs
+    return addrs
+
+
+def is_local_endpoint(base_url: str) -> bool:
+    """True when an OpenAI-compatible endpoint lives on this machine or its LAN.
+
+    Loopback is always local. Everything else must resolve to one of this
+    host's own addresses or sit in a private range (10/8, 172.16/12,
+    192.168/16) — a typical `http://192.168.1.20:11434` Ollama box counts,
+    api.openai.com does not. Privacy mode trusts this, and nothing else.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse((base_url or "").strip())
+        host = (parsed.hostname or "").strip().lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host in ("localhost", "::1", "127.0.0.1", "::ffff:127.0.0.1"):
+        return True
+    if host in _this_machine_addrs():
+        return True
+    try:
+        addr = socket.inet_aton(host)
+        octets = addr[0], addr[1]
+    except OSError:
+        return False                     # a name that is not an IP: resolve it
+    first, second = octets[0], octets[1]
+    if first == 10 or first == 192 and second == 168 or first == 172 and 16 <= second <= 31:
+        return True
+    return False
+
+
+def assert_privacy(base_url: str) -> None:
+    """Raise if privacy mode is on and `base_url` would leave this machine.
+
+    Blocking here — at the provider boundary, before any message is built —
+    means the guarantee holds for every route and every tool, and there is no
+    per-call check that a future edit can forget to add.
+    """
+    if not config.AGENTBOX_PRIVACY_MODE:
+        return
+    if is_local_endpoint(base_url):
+        return
+    raise RuntimeError(
+        "privacy mode is on (AGENT_LINUX_PRIVACY_MODE=1) and this provider is not a "
+        "local endpoint — point Agentbox at a local engine (Ollama, vLLM, LM Studio, "
+        "llama.cpp) on this machine or your LAN instead."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Local engine discovery — find the engines already running on this machine
+# --------------------------------------------------------------------------- #
+
+# port → (engine name, the path that proves it). Every one speaks
+# OpenAI-compatible /v1/models today, which is all Agentbox needs to work.
+LOCAL_ENGINE_PORTS: tuple[tuple[int, str, str], ...] = (
+    (11434, "Ollama", ""),
+    (8000,  "vLLM", ""),
+    (1234,  "LM Studio", ""),
+    (1337,  "Jan", ""),
+    (8080,  "llama.cpp", ""),
+    (4000,  "LiteLLM", ""),
+    (5000,  "text-gen-webui / LocalAI", ""),
+    (9997,  "LocalAI", ""),
+)
+
+
+async def _probe_local_engine(port: int, engine: str, _: str) -> dict[str, Any] | None:
+    """Is something OpenAI-compatible listening on this loopback port?"""
+    base = f"http://127.0.0.1:{port}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0), trust_env=False) as client:
+            res = await client.get(f"{base}/v1/models")
+            payload = res.json() if res.content else {}
+    except Exception:                              # noqa: BLE001 — a closed port is normal
+        return None
+    models: list[str] = []
+    if isinstance(payload, dict):
+        listed = payload.get("data")
+        if isinstance(listed, list):
+            models = [str(m.get("id")) for m in listed if isinstance(m, dict) and m.get("id")]
+    if not models and port == 11434:
+        # Ollama before its OpenAI shim, or with it disabled: /api/tags is native.
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(2.0), trust_env=False) as client:
+                res = await client.get(f"{base}/api/tags")
+                payload = res.json() if res.content else {}
+            models = [str(m.get("name") or m.get("model"))
+                      for m in (payload.get("models") or []) if isinstance(m, dict)]
+        except Exception:                          # noqa: BLE001
+            pass
+    if not models:
+        return None
+    return {"port": port, "engine": engine, "base_url": f"{base}/v1",
+            "models": models[:50]}
+
+
+async def detect_local_engines() -> list[dict[str, Any]]:
+    """Every local engine answering on a well-known port, models included."""
+    import asyncio
+
+    found = await asyncio.gather(*(
+        _probe_local_engine(port, engine, extra)
+        for port, engine, extra in LOCAL_ENGINE_PORTS
+    ))
+    return [engine for engine in found if engine]
+
+
+def _public_probe(engine: dict[str, Any]) -> dict[str, Any]:
+    """What the console sees: no secrets, just enough to offer a one-click add."""
+    return {
+        "engine": engine["engine"],
+        "base_url": engine["base_url"],
+        "models": engine["models"][:20],
+        "configured": any(
+            p.base_url.rstrip("/") == engine["base_url"].rstrip("/")
+            for p in load_providers().values()
+        ),
+    }
+
+
 def _env_provider() -> Provider | None:
     base = (config.AGENTBOX_BASE_URL or "").strip()
     if not base:
@@ -919,14 +1080,18 @@ def agentbox_status() -> dict:
     """What `/health` reports about the agent — never a guess."""
     providers = load_providers()
     active = default_provider()
-    return {
+    status: dict[str, Any] = {
         "configured": bool(providers),
         "providers": [p.id for p in providers.values()],
         "active": active.id if active else None,
         "model": active.model or None if active else None,
         "endpoint": active.base_url if active else None,
         "max_steps": config.AGENTBOX_MAX_STEPS,
+        "privacy_mode": bool(config.AGENTBOX_PRIVACY_MODE),
+        "local_only": all(is_local_endpoint(p.base_url) for p in providers.values()) if providers else None,
+        "system_prompt": "custom" if (config.AGENTBOX_SYSTEM_PROMPT or (config.build_root() / ".agentbox-system-prompt").is_file()) else "default",
     }
+    return status
 
 
 async def _resolve_model(provider: Provider, client: httpx.AsyncClient) -> str:
@@ -969,10 +1134,25 @@ async def _extra_tools() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
 async def _system_prompt() -> str:
     """The base prompt plus the skills index and a note about the database.
 
-    The skills index is the only per-turn cost of a skill library: a name and a
-    description each. The bodies stay on disk until `read_skill` asks for one.
+    The base prompt is yours to replace: AGENT_LINUX_AGENTBOX_SYSTEM_PROMPT, a
+    `<workspace>/.agentbox-system-prompt` file, or the built-in default — first
+    match wins, so an operator can pin a persona without touching code and a
+    workspace can carry its own without redeploying.
     """
-    parts = [SYSTEM_PROMPT]
+    # ---- override 1: environment -------------------------------------------
+    base = (config.AGENTBOX_SYSTEM_PROMPT or "").strip()
+    if not base:
+        # ---- override 2: a file beside the workspace ------------------------
+        try:
+            override_file = config.build_root() / ".agentbox-system-prompt"
+            if override_file.is_file():
+                base = override_file.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            base = ""
+    if not base:
+        base = SYSTEM_PROMPT
+
+    parts = [base]
     try:
         index = await skill_registry.index_prompt()
     except Exception:                             # noqa: BLE001
@@ -1062,6 +1242,54 @@ def _provider_error(pid: str) -> JSONResponse | None:
     )
 
 
+@router.get("/local-engines")
+async def local_engines():
+    """Local AI engines answering on this machine — nothing leaves the host.
+
+    The point of this route is one-click privacy: if Ollama or vLLM or LM
+    Studio is already running, the console can offer to wire it up as a
+    provider, and the user's prompts never need to visit a third party.
+    """
+    found = await detect_local_engines()
+    return {
+        "ok": True,
+        "privacy_mode": bool(config.AGENTBOX_PRIVACY_MODE),
+        "engines": [_public_probe(e) for e in found],
+    }
+
+
+@router.post("/local-engines/add")
+async def add_local_engine(request: Request):
+    """Add one discovered engine as a provider — with privacy enforced.
+
+    The base_url must be a loopback address; anything else is a mistake or an
+    attempt to exfiltrate through this route, so it is refused rather than
+    warned about.
+    """
+    body = await _body(request)
+    base_url = str(body.get("base_url") or "").strip()
+    if not base_url:
+        return JSONResponse({"error": "base_url is required", "code": "bad_request"},
+                            status_code=400)
+    if not is_local_endpoint(base_url):
+        return JSONResponse(
+            {"error": "only loopback endpoints can be added this way",
+             "code": "not_local"},
+            status_code=400,
+        )
+    engine = str(body.get("engine") or "local").strip().lower()[:40] or "local"
+    model = str(body.get("model") or "").strip()[:120]
+    provider = upsert_provider(
+        id=f"local-{engine}" if engine != "local" else "local",
+        base_url=base_url,
+        api_key="",
+        model=model,
+        label=f"Local {engine}",
+    )
+    return {"ok": True, "provider": provider.public(),
+            "providers": [p.public() for p in load_providers().values()]}
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -1093,6 +1321,14 @@ async def chat(request: Request):
     wanted_model = body.get("model") if isinstance(body.get("model"), str) else ""
     if wanted_model.strip():
         provider = Provider(**{**provider.__dict__, "model": wanted_model.strip()[:120]})
+
+    # Privacy mode: the check lives at the boundary, so no message is even
+    # assembled for an endpoint that would leave this machine.
+    try:
+        assert_privacy(provider.base_url)
+    except RuntimeError as err:
+        return JSONResponse({"error": str(err), "code": "privacy_mode_blocked"},
+                            status_code=403)
 
     label = body.get("label") if isinstance(body.get("label"), str) else ""
     label = label or agent_label(message)
@@ -1213,6 +1449,11 @@ async def models(provider: str = ""):
     if (missing := _provider_error(provider)) is not None:
         return missing
     target = resolve_provider(provider)
+    try:
+        assert_privacy(target.base_url)
+    except RuntimeError as err:
+        return JSONResponse({"error": str(err), "code": "privacy_mode_blocked"},
+                            status_code=403)
     async with _client(target) as client:
         try:
             res = await client.get("/models")
