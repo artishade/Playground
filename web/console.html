@@ -678,15 +678,15 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
           <p class="lead">Step budget per task, and how much history each turn carries.</p>
           <div class="row2">
             <label style="display:flex; flex-direction:column; gap:5px">
-              <span class="hint">steps per task</span>
-              <input id="setMaxSteps" type="number" min="1" max="30" placeholder="8">
+              <span class="hint">steps per task (0 = unlimited)</span>
+              <input id="setMaxSteps" type="number" min="0" placeholder="0 = unlimited">
             </label>
             <label style="display:flex; flex-direction:column; gap:5px">
-              <span class="hint">local history turns</span>
-              <input id="setHistory" type="number" min="0" max="50" placeholder="12">
+              <span class="hint">local history turns (0 = all)</span>
+              <input id="setHistory" type="number" min="0" placeholder="0 = all">
             </label>
           </div>
-          <span class="hint">steps are baked at deploy (AGENT_LINUX_AGENTBOX_MAX_STEPS); history is saved locally.</span>
+          <span class="hint">0 = unlimited for both (AGENT_LINUX_AGENTBOX_MAX_STEPS; history is saved locally).</span>
         </div>
 
         <div class="card">

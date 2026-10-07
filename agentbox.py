@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import socket
 import threading
@@ -59,8 +60,15 @@ log = logging.getLogger("agent_linux.agentbox")
 router = APIRouter()
 
 CALL_TIMEOUT = httpx.Timeout(connect=10.0, read=180.0, write=60.0, pool=30.0)
-MAX_TOOL_OUTPUT = 8000
-REPLY_HISTORY = 12          # messages kept per conversation
+# Tool output ships in full by default; set a positive number to cap it.
+MAX_TOOL_OUTPUT: int | None = None
+
+def _cap(text: str) -> str:
+    """Honour MAX_TOOL_OUTPUT when set; None ships the tool output in full."""
+    return text if MAX_TOOL_OUTPUT is None else text[:MAX_TOOL_OUTPUT]
+# Full conversation context by default; set a positive number to keep only
+# the last N messages. The agent sees everything the caller sends.
+REPLY_HISTORY: int | None = None
 ENV_PROVIDER_ID = "env"     # the provider built from AGENT_LINUX_AGENTBOX_* variables
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 REGISTRY_LOCK = threading.Lock()   # the registry is a tiny file; keep writes sane
@@ -352,7 +360,7 @@ async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
         if result is None:
             return {"error": "no terminal session is available"}
         output, code = result
-        return {"exit_code": code, "output": output[:MAX_TOOL_OUTPUT]}
+        return {"exit_code": code, "output": _cap(output)}
 
     if name == "read_file":
         import os
@@ -510,7 +518,7 @@ async def _ssh_tool(name: str, args: dict[str, Any]) -> Any:
             "host": host_name,
             "target": ssh_mod.public_host(host)["target"],
             "exit_code": code,
-            "output": stdout[:MAX_TOOL_OUTPUT],
+            "output": _cap(stdout),
             "latency_ms": int((_time.time() - started) * 1000),
         }
         if code != 0:
@@ -585,7 +593,7 @@ async def _account_tool(name: str, args: dict[str, Any]) -> Any:
             "account": account,
             "variables": sorted(values),
             "exit_code": code,
-            "output": (output or "")[:MAX_TOOL_OUTPUT],
+            "output": _cap(output or ""),
         }
         if code != 0:
             result["error"] = "the command exited non-zero — see output"
@@ -1344,10 +1352,11 @@ async def chat(request: Request):
     system = body.get("system") if isinstance(body.get("system"), str) else ""
     messages: list[dict[str, Any]] = [{"role": "system",
                                        "content": await _system_prompt(system)}]
-    for turn in history[-REPLY_HISTORY:]:
+    recent = history if REPLY_HISTORY is None else history[-REPLY_HISTORY:]
+    for turn in recent:
         if isinstance(turn, dict) and turn.get("role") in ("user", "assistant"):
             messages.append({"role": turn["role"],
-                             "content": str(turn.get("content") or "")[:8000]})
+                             "content": str(turn.get("content") or "")})
     messages.append({"role": "user", "content": message.strip()})
 
     # Everything the agent gained beyond its five built-ins: MCP servers and
@@ -1358,7 +1367,13 @@ async def chat(request: Request):
     async with _client(provider) as client:
         try:
             model = await _resolve_model(provider, client)
-            for _ in range(config.AGENTBOX_MAX_STEPS):
+            # A budget of 0 means unlimited: the loop ends only when the model
+            # stops calling tools or calls `finish` itself.
+            budget = config.AGENTBOX_MAX_STEPS
+            remaining = math.inf if budget <= 0 else budget
+            used = 0
+            while used < remaining:
+                used += 1
                 reply = await _chat(client, model, messages, extra_tools=extra_tools)
                 calls = _tool_calls(reply)
                 messages.append({k: v for k, v in reply.items() if v is not None})
@@ -1377,7 +1392,7 @@ async def chat(request: Request):
                         result = {"error": f"{err.__class__.__name__}: {err}"}
                     steps.append({"tool": call["name"], "args": call["args"], "result": result})
                     messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": json.dumps(result)[:MAX_TOOL_OUTPUT]})
+                                     "content": _cap(json.dumps(result))})
 
                     # `finish` is the agent's own "I am done" button; its summary
                     # is the answer, and the loop ends whether or not the model
@@ -1397,10 +1412,12 @@ async def chat(request: Request):
             return JSONResponse({"error": str(err), "code": "agentbox_error"},
                                 status_code=502)
 
-    # The step budget ran out — say so honestly instead of pretending it worked.
+    # A finite budget ran out — say so honestly instead of pretending it worked.
+    # With the default unlimited budget this line is unreachable: the only way
+    # out of the loop above is a finished answer or an exception.
     return JSONResponse(
         {"error": f"the agent hit its {config.AGENTBOX_MAX_STEPS}-step budget; "
-                  "raise AGENT_LINUX_AGENTBOX_MAX_STEPS or ask for something smaller.",
+                  "unset AGENT_LINUX_AGENTBOX_MAX_STEPS (0 = unlimited) or ask for something smaller.",
          "code": "agentbox_budget_exhausted", "steps": steps},
         status_code=200,
     )

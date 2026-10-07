@@ -60,7 +60,7 @@
     browser: { stream: null, running: false, available: true, url: '', title: '',
                viewport: { width: 1280, height: 800 }, frames: 0, lastFrameAt: 0, fps: 0 },
     online: null,
-    historyTurns: 12,
+    historyTurns: 0,        // 0 = send the full conversation
   };
 
   // ---- tiny helpers -----------------------------------------------------------
@@ -745,9 +745,11 @@
 
   function historyForApi() {
     const topic = currentTopic();
-    return topic.messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .slice(-state.historyTurns * 2)
+    const msgs = topic.messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant');
+    // 0 (or below) = no window: the agent gets the whole conversation.
+    const win = state.historyTurns > 0 ? state.historyTurns * 2 : msgs.length;
+    return msgs.slice(-win)
       .map((m) => ({ role: m.role, content: m.content }));
   }
 
@@ -2291,9 +2293,9 @@
     });
     const hist = $('setHistory');
     if (hist) {
-      hist.value = String(store.get('agent_linux_history', '12'));
+      hist.value = String(store.get('agent_linux_history', '0'));
       on(hist, 'change', () => {
-        const n = Math.max(0, Math.min(50, parseInt(hist.value, 10) || 12));
+        const n = Math.max(0, parseInt(hist.value, 10) || 0);
         state.historyTurns = n;
         store.set('agent_linux_history', String(n));
         toast(`history: ${n} turns`, 'ok');
@@ -2555,7 +2557,7 @@
     if (!state.assistants.find((a) => a.id === state.activeAssistant)) state.activeAssistant = 'agentbox';
     loadChats();
     loadPaintings();
-    state.historyTurns = Math.max(0, Math.min(50, parseInt(store.get('agent_linux_history', '12'), 10) || 12));
+    state.historyTurns = Math.max(0, parseInt(store.get('agent_linux_history', '0'), 10) || 0);
     applyTheme(store.get('agent_linux_theme', 'cherry'));
     seatSidebar();
     wire();

@@ -20,8 +20,8 @@ can never leave the service unauthenticated.
     AGENT_LINUX_AGENTBOX_BASE_URL       OpenAI-compatible endpoint for Agentbox
     AGENT_LINUX_AGENTBOX_API_KEY        its API key
     AGENT_LINUX_AGENTBOX_MODEL          model id (default: first from /models)
-    AGENT_LINUX_AGENTBOX_MAX_STEPS      tool-call budget per task (default 8)
-    AGENT_LINUX_AGENTBOX_STEP_TIMEOUT   seconds one tool call may take (default 120)
+    AGENT_LINUX_AGENTBOX_MAX_STEPS      tool-call budget per task (0 = unlimited, default 0)
+    AGENT_LINUX_AGENTBOX_STEP_TIMEOUT   seconds one tool call may take (0 = none, default 0)
     AGENT_LINUX_AGENTBOX_PROVIDER_FILE  where saved providers live
     AGENT_LINUX_AGENTBOX_SYSTEM_PROMPT  replace the agent's persona wholesale
     AGENT_LINUX_PRIVACY_MODE            local endpoints only — prompts never leave
@@ -126,8 +126,13 @@ TERMINAL_SERVICE_TOKEN = env.secret("TOKEN")
 AGENTBOX_BASE_URL = env.get("AGENTBOX_BASE_URL").rstrip("/")
 AGENTBOX_API_KEY = env.secret("AGENTBOX_API_KEY")
 AGENTBOX_MODEL = env.get("AGENTBOX_MODEL")
-AGENTBOX_MAX_STEPS = max(1, min(30, env.int_or("AGENTBOX_MAX_STEPS", 8)))
-AGENTBOX_STEP_TIMEOUT = env.int_or("AGENTBOX_STEP_TIMEOUT", 120)
+# The step budget is the agent's freedom, not a leash: 0 (the default) means
+# unlimited — the agent works until the task is genuinely done. Any positive
+# value still works for operators who want a deterministic bound.
+AGENTBOX_MAX_STEPS = max(0, env.int_or("AGENTBOX_MAX_STEPS", 0))
+# 0 = no per-call timeout: a build, a training run or a download may take as
+# long as it takes. Set a positive number to reintroduce a ceiling.
+AGENTBOX_STEP_TIMEOUT = env.int_or("AGENTBOX_STEP_TIMEOUT", 0)
 # Where the saved custom providers live. Empty = <workspace>/.agentbox-providers.json
 AGENTBOX_PROVIDER_FILE = env.get("AGENTBOX_PROVIDER_FILE")
 
