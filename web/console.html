@@ -96,6 +96,11 @@ body { margin: 0; background: var(--bg); color: var(--fg); overflow: hidden;
   font: 500 11px var(--mono); padding: 4px 9px; border-radius: 8px; white-space: nowrap;
   opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 60; }
 .rbtn:hover .tip { opacity: 1; }
+/* collapsed sidebar: the rail stays, the list column folds away */
+body.side-collapsed .list-col { display: none; }
+body.side-collapsed #sideToggle { color: var(--fg); background: var(--acc-soft); border-color: var(--acc-line); }
+body.side-collapsed #sideToggle svg .chev { transform: rotate(180deg); transform-origin: 8px 12px; }
+#sideToggle svg .chev { transition: transform .18s ease; }
 
 /* list column */
 .list-col { width: var(--list-w); flex: none; display: flex; flex-direction: column; min-height: 0;
@@ -446,6 +451,10 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
 
   <!-- rail -->
   <nav class="rail" aria-label="primary">
+    <button type="button" class="rbtn" id="sideToggle" title="toggle sidebar" aria-pressed="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/><path class="chev" d="M13 9l3 3-3 3"/></svg>
+      <span class="tip">Sidebar · Alt+B</span>
+    </button>
     <span class="logo" aria-hidden="true">
       <svg viewBox="0 0 32 32" fill="none">
         <path d="M11 21l10-10M21 11h-7m7 0v7" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -676,6 +685,20 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
           <div class="row2">
             <button type="button" id="wipeChats">clear all chats</button>
             <button type="button" id="wipeAll">reset everything</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <b>PERSISTENCE</b>
+          <p class="lead">A rolling snapshot of this host's config — model providers, MCP servers, skills, plugins, accounts, SSH keys and hosts — is saved to the store after every change, and merged back in on boot. A redeploy can no longer take your setup with it.</p>
+          <div id="backupCard"></div>
+          <div class="row3">
+            <span id="backupInfo" class="hint">checking…</span>
+            <span></span>
+            <span style="display:flex; gap:6px">
+              <button type="button" id="backupNow">snapshot now</button>
+              <button type="button" id="backupRestore">restore</button>
+            </span>
           </div>
         </div>
 

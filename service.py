@@ -51,6 +51,7 @@ from agent_linux.browser_api import router as browser_router
 from agent_linux.credentials import router as credentials_router
 from agent_linux.env import describe as env_describe
 from agent_linux.store import describe as store_describe
+from agent_linux import vault_backup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("agent_linux.service")
@@ -81,6 +82,16 @@ async def lifespan(_app: FastAPI):
         await terminal_link.current().ensure_default()
     except Exception as err:  # never block boot on the warmup shell
         log.warning("default cloud shell warmup skipped: %s", err)
+    # A redeploy reimages an ephemeral host and takes the saved providers, MCP
+    # servers, skills, plugins, accounts and SSH material with it. The store is
+    # the one thing that can outlive that — merge whatever it has back in.
+    try:
+        summary = await vault_backup.restore_if_needed()
+        if summary.get("restored"):
+            log.info("config restored from the %s store: %s",
+                     summary.get("counts"), summary.get("items"))
+    except Exception as err:                       # noqa: BLE001 — never block boot
+        log.debug("config restore skipped: %s", err)
     log.info("Agent_Linux terminal service up on %s:%s (root of %s)",
              TERMINAL_SERVICE_HOST, TERMINAL_SERVICE_PORT, PACKAGE_ROOT)
     yield
@@ -114,6 +125,11 @@ TOKEN_HEADERS = ("x-nova-terminal-token", "authorization")
 # every API call it makes, so opening it leaks nothing.
 OPEN_PATHS = ("/health", "/api/health", "/", "/index.html", "/console",
               "/agent", "/agent/", "/static/console.js")
+
+# After every successful config mutation, copy the host's config into the store
+# — the one place a redeploy cannot reach. One middleware covers every route,
+# present and future; see vault_backup.py.
+vault_backup.install_persistence(app)
 
 
 def _ssh_report() -> dict[str, Any]:
@@ -220,6 +236,10 @@ app.include_router(browser_router, prefix="/agent/browser", tags=["browser"])
 # them too (an ssh_run tool, an account_env tool), not only the console.
 app.include_router(credentials_router, prefix="/agent", tags=["credentials"])
 
+# The config side-car — what a redeploy must not be able to take from you.
+# GET /agent/backup, POST /agent/backup/snapshot, POST /agent/backup/restore.
+app.include_router(vault_backup.router, prefix="/agent", tags=["backup"])
+
 
 # --------------------------------------------------------------------------- #
 # The page — a terminal hosted alone still has to be *usable* in a browser:
@@ -281,6 +301,10 @@ async def health():
         "auth_required": bool(TERMINAL_SERVICE_TOKEN),
         "agentbox": agentbox_status(),
         "store": store_describe(),
+        "backup": {
+            "key": vault_backup.SNAPSHOT_KEY,
+            "auto": True,
+        },
         "browser": _browser_report(),
         "env": env_describe(),
         "ssh": _ssh_report(),

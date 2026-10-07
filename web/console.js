@@ -187,6 +187,22 @@
     store.set('agent_linux_theme', state.theme);
   }
 
+  // ---- sidebar toggle -------------------------------------------------------------------
+
+  function applySidebar(open) {
+    document.body.classList.toggle('side-collapsed', !open);
+    document.body.classList.toggle('list-open', open && global.innerWidth <= 900);
+    const t = $('sideToggle');
+    if (t) t.setAttribute('aria-pressed', String(open));
+    store.set('agent_linux_sidebar', open ? 'open' : 'collapsed');
+  }
+  function sidebarOpen() {
+    return !document.body.classList.contains('side-collapsed');
+  }
+  function toggleSidebar() {
+    applySidebar(!sidebarOpen());
+  }
+
   // ---- views -------------------------------------------------------------------------
 
   const LIST_TITLES = { chats: 'Chats', terminal: 'Shells', browser: 'Quick links',
@@ -2041,6 +2057,7 @@
       { icon: '＋', label: 'New shell', hint: 'Alt+T', run: () => { showView('terminal'); newSession(); } },
       { icon: '✎', label: 'Assistants', hint: 'personas', run: () => { const p = $('asstPanel'); p.hidden = false; renderAssistantEditor(); } },
       { icon: '⧉', label: 'Extensions drawer', hint: 'MCP · skills · plugins', run: () => { const p = $('extPanel'); p.hidden = !p.hidden; if (!p.hidden) loadExtensions(); } },
+      { icon: '⌗', label: 'Toggle sidebar', hint: 'Alt+B', run: toggleSidebar },
       { icon: '⚿', label: 'Credentials drawer', hint: 'SSH · accounts', run: () => { const p = $('credPanel'); p.hidden = !p.hidden; if (!p.hidden) loadCredentials(); } },
       { icon: '⏻', label: 'Launch browser engine', run: () => { showView('browser'); browserStart(); } },
     ];
@@ -2139,6 +2156,87 @@
 
   // ---- settings wiring -----------------------------------------------------------------------------------------------
 
+  // ---- config persistence -----------------------------------------------------------------------------------
+
+  const backup = { loaded: false };
+
+  function describeCounts(counts) {
+    if (!counts) return '';
+    const parts = [];
+    const labels = { providers: 'providers', mcp: 'MCP', skills: 'skills', plugins: 'plugins',
+                     accounts: 'accounts', ssh: 'ssh' };
+    Object.keys(labels).forEach((k) => {
+      if (counts[k]) parts.push(`${counts[k]} ${labels[k]}`);
+    });
+    return parts.length ? parts.join(' · ') : 'empty';
+  }
+
+  async function loadBackup(force) {
+    const info = $('backupInfo');
+    const card = $('backupCard');
+    if (!info && !card) return;
+    try {
+      const { status, body } = await json(`${AGENT}/backup`);
+      if (status !== 200 || !body || !body.ok) {
+        if (info) info.textContent = body && body.error ? `snapshot: ${body.error}` : 'snapshot unavailable';
+        return;
+      }
+      backup.loaded = true;
+      backup.last = body;
+      const when = body.saved_at
+        ? new Date(body.saved_at * 1000).toLocaleString()
+        : 'never';
+      const detail = describeCounts(body.counts);
+      if (info) {
+        info.textContent = `store: ${body.backend} · snapshot: ${when}` +
+          (body.age_s != null ? ` (${Math.round(body.age_s / 60)}m ago)` : '') +
+          (detail ? ` · ${detail}` : '');
+      }
+      if (card) {
+        card.textContent = '';
+        const row = el('div', 'top');
+        row.append(el('b', '', body.reachable ? 'protected' : 'store unreachable'));
+        row.append(el('span', 'grow'));
+        row.append(el('span', 'tagx' + (body.backend === 'file' ? '' : ' acc'),
+          body.backend === 'file' ? 'file — survives restarts, not redeploys'
+            : `${body.backend} — survives redeploys`));
+        card.append(row);
+        if (body.backend === 'file') {
+          card.append(el('div', 'meta',
+            'Tip: add a Postgres/Neon/Supabase account in Credentials → Accounts and activate it — then the snapshot survives even a full reimage.'));
+        }
+        if (body.backend !== 'file' && body.vault_env_key === false) {
+          card.append(el('div', 'bad-line',
+            'AGENT_LINUX_SECRET_KEY is not set — the snapshot is sealed with a generated key that a rebuild replaces. Set it as an env var so secrets stay readable after a reimage.'));
+        }
+      }
+    } catch (err) {
+      if (info) info.textContent = 'snapshot status unavailable';
+    }
+  }
+
+  async function backupSnapshotNow() {
+    const { status, body } = await json(`${AGENT}/backup/snapshot`, { method: 'POST' });
+    if (status !== 200 || !body.ok) { toast((body && body.error) || 'snapshot failed', 'err'); return; }
+    toast(`snapshot saved — ${describeCounts(body.counts) || 'nothing to keep yet'}`, 'ok');
+    loadBackup(true);
+  }
+
+  async function backupRestoreNow() {
+    if (global.confirm && !global.confirm(
+      'Restore the stored snapshot? Missing providers, MCP servers, skills, plugins, accounts and SSH entries are re-created; existing ones are left alone.')) return;
+    const { status, body } = await json(`${AGENT}/backup/restore`, { method: 'POST' });
+    if (status === 404) { toast('no snapshot saved yet', 'err'); return; }
+    if (status !== 200 || !body.ok) { toast((body && body.error) || 'restore failed', 'err'); return; }
+    const done = body.restored || {};
+    const parts = Object.keys(done).map((k) => `${done[k]} ${k}`);
+    toast(parts.length ? `restored: ${parts.join(' · ')}` : 'already in sync — nothing to restore', 'ok');
+    loadProviders();
+    loadExtensions(true);
+    loadCredentials(true);
+    loadBackup(true);
+  }
+
   function wireSettings() {
     on($('wipeChats'), 'click', () => {
       if (global.confirm && !global.confirm('Delete every chat on this device?')) return;
@@ -2174,16 +2272,26 @@
         toast(`history: ${n} turns`, 'ok');
       });
     }
+    // config persistence
+    on($('backupNow'), 'click', backupSnapshotNow);
+    on($('backupRestore'), 'click', backupRestoreNow);
+    loadBackup();
   }
 
   // ---- wiring -----------------------------------------------------------------------------------------------------------
 
   function wire() {
+    // sidebar toggle — the rail always stays; this folds the list column
+    on($('sideToggle'), 'click', toggleSidebar);
     // rail views
     document.querySelectorAll('.rbtn[data-view]').forEach((node) => {
       on(node, 'click', () => {
         showView(node.dataset.view);
-        if (global.innerWidth <= 900 && node.dataset.view === 'chats') document.body.classList.add('list-open');
+        if (global.innerWidth <= 900) {
+          // a view was picked on a phone: bring the list back if it was folded
+          if (!sidebarOpen()) applySidebar(true);
+          else if (node.dataset.view === 'chats') document.body.classList.add('list-open');
+        }
       });
     });
     // list
@@ -2378,7 +2486,7 @@
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const key = e.key.toLowerCase();
       if (key === 't') { e.preventDefault(); showView('terminal'); newSession(); }
-      else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('list-open'); }
+      else if (key === 'a') { e.preventDefault(); toggleSidebar(); }
       else if (key === 'p') { e.preventDefault(); palette.open ? paletteClose() : paletteOpen(); }
       else if (key === 'b') { e.preventDefault(); showView('browser'); }
       else if (key === 'r') { e.preventDefault(); renameActive(); }
@@ -2400,6 +2508,7 @@
     loadPaintings();
     state.historyTurns = Math.max(0, Math.min(50, parseInt(store.get('agent_linux_history', '12'), 10) || 12));
     applyTheme(store.get('agent_linux_theme', 'cherry'));
+    applySidebar(store.get('agent_linux_sidebar', 'open') !== 'collapsed');
     wire();
     buildTerminal();
     setLink(null, 'linking');
@@ -2430,6 +2539,7 @@
     generatePainting, renderPaintings, openLightbox, closeLightbox,
     paletteOpen, paletteClose, paletteRender, paletteCommands,
     loadExtensions, loadCredentials, boot, ping, uploadAttachment,
+    toggleSidebar, applySidebar, loadBackup, backupSnapshotNow, backupRestoreNow,
   };
 
   global.AgentLinuxConsole = AgentLinuxConsole;
