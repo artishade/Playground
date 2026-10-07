@@ -182,6 +182,11 @@ async def require_token(request: Request, call_next):
     if not offered:
         auth = (request.headers.get(TOKEN_HEADERS[1]) or "").strip()
         offered = auth.removeprefix("Bearer ").strip()
+    if not offered:
+        # EventSource and <img> cannot send headers: the browser frame stream,
+        # the workspace files and any SSE view ride the token in the query
+        # string instead. Same secret, weaker channel — still not public.
+        offered = (request.query_params.get("token") or "").strip()
     if offered != TERMINAL_SERVICE_TOKEN:
         return JSONResponse(
             {"error": "A valid X-Nova-Terminal-Token header is required.", "code": "unauthorized"},

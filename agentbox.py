@@ -6,7 +6,8 @@ is that mind, and it lives in the terminal host — so **deploying only
 `agent_linux/` gives you the shells *and* the agent**, with no Agent_Linux gateway,
 no database and no dashboard involved.
 
-    POST /agent/chat        {message, provider?, model?, history?} → the answer
+    POST /agent/chat        {message, provider?, model?, system?, history?} → the answer
+    POST /agent/images/generate   {prompt, provider?, model?, size?} → images
     GET/POST/DELETE /agent/providers   add and choose custom providers
     GET  /agent/models      what a provider can think with
 
@@ -1131,16 +1132,21 @@ async def _extra_tools() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return mcp_tools + plugin_tools, problems
 
 
-async def _system_prompt() -> str:
+async def _system_prompt(override: str = "") -> str:
     """The base prompt plus the skills index and a note about the database.
 
-    The base prompt is yours to replace: AGENT_LINUX_AGENTBOX_SYSTEM_PROMPT, a
-    `<workspace>/.agentbox-system-prompt` file, or the built-in default — first
-    match wins, so an operator can pin a persona without touching code and a
-    workspace can carry its own without redeploying.
+    The base prompt is yours to replace, in order of precedence: a per-request
+    persona (the console's assistants send their `system` here),
+    AGENT_LINUX_AGENTBOX_SYSTEM_PROMPT, a `<workspace>/.agentbox-system-prompt`
+    file, or the built-in default — first match wins, so an operator can pin a
+    persona without touching code and a workspace can carry its own without
+    redeploying.
     """
-    # ---- override 1: environment -------------------------------------------
-    base = (config.AGENTBOX_SYSTEM_PROMPT or "").strip()
+    # ---- override 0: per-request persona ------------------------------------
+    base = (override or "").strip()
+    if not base:
+        # ---- override 1: environment ----------------------------------------
+        base = (config.AGENTBOX_SYSTEM_PROMPT or "").strip()
     if not base:
         # ---- override 2: a file beside the workspace ------------------------
         try:
@@ -1333,7 +1339,11 @@ async def chat(request: Request):
     label = body.get("label") if isinstance(body.get("label"), str) else ""
     label = label or agent_label(message)
     history = body.get("history") if isinstance(body.get("history"), list) else []
-    messages: list[dict[str, Any]] = [{"role": "system", "content": await _system_prompt()}]
+    # A per-request persona (the console's assistants) outranks every other
+    # prompt source: the caller asked for *this* turn to think a certain way.
+    system = body.get("system") if isinstance(body.get("system"), str) else ""
+    messages: list[dict[str, Any]] = [{"role": "system",
+                                       "content": await _system_prompt(system)}]
     for turn in history[-REPLY_HISTORY:]:
         if isinstance(turn, dict) and turn.get("role") in ("user", "assistant"):
             messages.append({"role": turn["role"],
@@ -1468,3 +1478,190 @@ async def models(provider: str = ""):
         "model": target.model or (listed[0].get("id") if listed else None),
         "models": [m.get("id") for m in (listed or []) if isinstance(m, dict)][:100],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Images — Cherry-style paintings: text → image against one provider
+# --------------------------------------------------------------------------- #
+
+IMAGE_SIZES = ("512x512", "768x768", "1024x1024", "1024x1792", "1792x1024")
+
+
+@router.post("/images/generate")
+async def generate_images(request: Request):
+    """One or more images from a prompt, saved into the workspace.
+
+    Any OpenAI-compatible `/v1/images/generations` endpoint works (OpenAI,
+    an OpenRouter image model behind a compat shim, a local
+    Stable-Diffusion-webui bridge). The files land in the workspace so they
+    ride the same storage as everything else the agent makes; the response
+    carries workspace-relative paths plus whatever the endpoint returned.
+    """
+    if (missing := agentbox_configured_response()) is not None:
+        return missing
+    body = await _body(request)
+    prompt = str(body.get("prompt") or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "prompt is required", "code": "bad_request"},
+                            status_code=400)
+    pid = body.get("provider") if isinstance(body.get("provider"), str) else ""
+    if (missing := _provider_error(pid)) is not None:
+        return missing
+    provider = resolve_provider(pid)
+    try:
+        assert_privacy(provider.base_url)
+    except RuntimeError as err:
+        return JSONResponse({"error": str(err), "code": "privacy_mode_blocked"},
+                            status_code=403)
+
+    wanted = str(body.get("model") or "").strip()[:120] or "dall-e-3"
+    size = str(body.get("size") or "1024x1024").strip()
+    if size not in IMAGE_SIZES:
+        size = "1024x1024"
+    try:
+        count = max(1, min(4, int(body.get("count") or 1)))
+    except (TypeError, ValueError):
+        count = 1
+
+    # An image call goes to the provider's own endpoint, not the chat one:
+    # `base_url` already ends in /v1, so `/images/generations` composes onto it.
+    async with _client(provider) as client:
+        try:
+            res = await client.post("/images/generations", json={
+                "model": wanted, "prompt": prompt[:4000],
+                "n": count, "size": size, "response_format": "b64_json",
+            }, timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=30.0))
+        except httpx.HTTPError as err:
+            return JSONResponse(
+                {"error": f"the image endpoint is not answering ({err.__class__.__name__}).",
+                 "code": "agentbox_unreachable"},
+                status_code=502)
+        if res.status_code >= 400:
+            return JSONResponse(
+                {"error": f"image endpoint returned HTTP {res.status_code} ({res.text[:300].strip()})",
+                 "code": "agentbox_error"},
+                status_code=502)
+        payload = res.json() if res.content else {}
+    items = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not items:
+        return {"ok": True, "prompt": prompt, "images": [], "note": "the endpoint returned no images"}
+
+    import base64
+    import time as _time
+
+    from .config import build_root
+
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    directory = build_root() / "paintings"
+    directory.mkdir(parents=True, exist_ok=True)
+    saved: list[dict[str, Any]] = []
+    for index, item in enumerate(items[:count]):
+        if not isinstance(item, dict):
+            continue
+        raw = None
+        if item.get("b64_json"):
+            try:
+                raw = base64.b64decode(str(item["b64_json"]))
+            except (ValueError, TypeError):
+                raw = None
+        elif item.get("url"):
+            saved.append({"url": str(item["url"]), "kind": "url"})
+            continue
+        if not raw:
+            continue
+        target = directory / f"painting-{stamp}-{index + 1}.png"
+        try:
+            with open(target, "wb") as fh:
+                fh.write(raw)
+        except OSError as err:
+            saved.append({"error": f"cannot write {target}: {err}"})
+            continue
+        saved.append({"path": f"paintings/{target.name}", "bytes": len(raw), "kind": "file"})
+    revised = ""
+    for item in items:
+        if isinstance(item, dict) and item.get("revised_prompt"):
+            revised = str(item["revised_prompt"])
+            break
+    return {"ok": True, "prompt": prompt, "model": wanted, "size": size,
+            "images": saved, "revised_prompt": revised or None}
+
+
+# --------------------------------------------------------------------------- #
+# Uploads — an image or text file from the composer becomes a workspace path
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/files/upload")
+async def upload_file(request: Request):
+    """Multipart upload → workspace path. Small files only.
+
+    Images ride into the conversation as `file://` mention the model can see
+    only through its tools (the terminal reads them back); text files the
+    model can `read_file` directly. Everything lands under `uploads/` with a
+    timestamped name so two uploads never collide.
+    """
+    import os
+    import time as _time
+
+    from .config import build_root
+
+    try:
+        form = await request.form()
+    except Exception as err:                       # noqa: BLE001
+        return JSONResponse({"error": f"bad multipart form ({err.__class__.__name__})",
+                             "code": "bad_request"}, status_code=400)
+    part = form.get("file")
+    if part is None or not hasattr(part, "read"):
+        return JSONResponse({"error": "file field is required", "code": "bad_request"},
+                            status_code=400)
+    raw = await part.read()
+    if not raw:
+        return JSONResponse({"error": "the file is empty", "code": "bad_request"},
+                            status_code=400)
+    MAX_BYTES = 10 * 1024 * 1024
+    if len(raw) > MAX_BYTES:
+        return JSONResponse({"error": "file is larger than 10 MB", "code": "too_large"},
+                            status_code=413)
+    name = (getattr(part, "filename", "") or "upload.bin").replace("/", "_").replace("\\", "_")
+    name = os.path.basename(name)[:120] or "upload.bin"
+    directory = build_root() / "uploads"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    target = directory / f"{stamp}-{name}"
+    try:
+        with open(target, "wb") as fh:
+            fh.write(raw)
+    except OSError as err:
+        return JSONResponse({"error": f"cannot write {target}: {err}", "code": "io_error"},
+                            status_code=500)
+    return {"ok": True,
+            "path": f"uploads/{target.name}",
+            "bytes": len(raw),
+            "name": name}
+
+
+@router.get("/files/{file_path:path}")
+async def workspace_file(file_path: str):
+    """Serve a file from the workspace — paintings, screenshots, exports.
+
+    Read-only and prefix-checked: `..` cannot climb out of the workspace, and
+    only files inside it are reachable. This is how the console shows generated
+    images without the host having to mount anything.
+    """
+    import os
+
+    from .config import build_root
+
+    root = build_root().resolve()
+    try:
+        target = (root / file_path).resolve()
+    except OSError:
+        return JSONResponse({"error": "bad path", "code": "bad_request"}, status_code=400)
+    if not (target == root or os.path.commonpath([str(root), str(target)]) == str(root)):
+        return JSONResponse({"error": "path escapes the workspace", "code": "forbidden"},
+                            status_code=403)
+    if not target.is_file():
+        return JSONResponse({"error": "no such file", "code": "not_found"}, status_code=404)
+    from fastapi.responses import FileResponse
+
+    return FileResponse(target, headers={"Cache-Control": "private, max-age=60"})

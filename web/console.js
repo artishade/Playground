@@ -1,82 +1,151 @@
 /**
- * Agent_Linux terminal console — the standalone workspace client · skin v2.
+ * Agent_Linux console — Cherry Studio-style client.
  *
- * One page for a terminal that may be hosted with nothing else: the shell tabs
- * on the left, Agentbox on the right, providers manageable in place. It talks
- * to the same contract the dashboard uses (`terminal/api.py`) under the host's
- * own `/terminal/pty` prefix, plus `/agent` for the AI side.
+ * Views: chats · terminal · live browser · paintings · settings, behind an
+ * icon rail and a context list column. Chats are topics (named, persisted in
+ * localStorage) with assistants (personas → per-request system prompt),
+ * a composer model/provider picker and attachments. The terminal keeps real
+ * PTY tabs over SSE; the browser view streams a shared Chromium; paintings
+ * call the agent's image endpoint and file library.
  *
- * Two rendering paths on purpose: xterm.js when the CDN is reachable (real
- * emulation — colour, cursor, vim, top), and a plain append-only viewer when it
- * is not, because a terminal that renders nothing the moment jsdelivr is
- * blocked is not a terminal. Both accept the same keystrokes.
- *
- * v2 additions: boot splash, command palette (Ctrl+K), draggable agent-pane
- * resizer with a persisted width, statusbar, typing indicator, richer agent
- * messages and code blocks. The UI layer stays dependency-free: no framework,
- * no build step, one file.
+ * No framework, no build step, one file.
  */
 (function (global) {
   'use strict';
 
   const API = '/terminal/pty';
   const AGENT = '/agent';
-  const THEMES = ['obsidian', 'plasma', 'matrix', 'glacier', 'ember'];
-  // xterm cannot read CSS variables, so the terminal palette is mirrored here.
+  const EXT = '/agent/extensions';
+  const BROWSER = '/agent/browser';
+  const CRED = '/agent';
+  const VIEWS = ['chats', 'terminal', 'browser', 'paintings', 'settings'];
+  const THEMES = ['cherry', 'cherry-light', 'obsidian', 'plasma', 'matrix', 'glacier', 'ember'];
   const TERM_THEMES = {
-    obsidian: { background: '#05060c', foreground: '#cbd5e1', cursor: '#7c5cff', selectionBackground: '#7c5cff40' },
-    plasma:   { background: '#0a0510', foreground: '#e6d9f5', cursor: '#ff3ea5', selectionBackground: '#ff3ea540' },
-    matrix:   { background: '#040a07', foreground: '#c8f7d6', cursor: '#3ee07f', selectionBackground: '#3ee07f40' },
-    glacier:  { background: '#040810', foreground: '#cfe3ff', cursor: '#38bdf8', selectionBackground: '#38bdf840' },
-    ember:    { background: '#0c0705', foreground: '#f6ddd0', cursor: '#fb923c', selectionBackground: '#fb923c40' },
+    'cherry':       { background: '#0d0d12', foreground: '#cdd2e0', cursor: '#eb5757', selectionBackground: '#eb575740' },
+    'cherry-light': { background: '#ffffff', foreground: '#2a2c36', cursor: '#eb5757', selectionBackground: '#eb575733' },
+    obsidian:       { background: '#05060c', foreground: '#cbd5e1', cursor: '#7c5cff', selectionBackground: '#7c5cff40' },
+    plasma:         { background: '#0a0510', foreground: '#e6d9f5', cursor: '#ff3ea5', selectionBackground: '#ff3ea540' },
+    matrix:         { background: '#040a07', foreground: '#c8f7d6', cursor: '#3ee07f', selectionBackground: '#3ee07f40' },
+    glacier:        { background: '#040810', foreground: '#cfe3ff', cursor: '#38bdf8', selectionBackground: '#38bdf840' },
+    ember:          { background: '#0c0705', foreground: '#f6ddd0', cursor: '#fb923c', selectionBackground: '#fb923c40' },
   };
+  const DEFAULT_ASSISTANTS = [
+    { id: 'agentbox', name: 'Agentbox', emoji: '📦', prompt: '' },
+    { id: 'devops', name: 'DevOps', emoji: '🛠️',
+      prompt: 'You are a pragmatic DevOps engineer. Prefer the smallest safe command, explain what you are checking and why, and never run destructive commands without saying so first.' },
+    { id: 'coder', name: 'Pair Coder', emoji: '👨‍💻',
+      prompt: 'You are a senior pair programmer. Read before you write, keep changes minimal, and show the diff-style summary of what you changed and why.' },
+    { id: 'writer', name: 'Tech Writer', emoji: '✍️',
+      prompt: 'You are a precise technical writer. Prefer concrete facts from the workspace over generic advice, and format answers with short headed sections.' },
+  ];
+  const QUICK_LINKS = ['example.com', 'news.ycombinator.com', 'github.com', 'wikipedia.org'];
 
   const state = {
     token: '',
-    sessions: [],
-    active: null,
-    offset: 0,
-    stream: null,
-    cols: 120,
-    rows: 32,
-    history: [],
-    providers: [],
-    provider: '',
-    pending: null,
-    max: 8,
-    theme: 'obsidian',
-    retry: 0,
+    view: 'chats',
+    theme: 'cherry',
+    // terminal
+    sessions: [], active: null, offset: 0, stream: null, cols: 120, rows: 32,
+    max: 8, retry: 0,
+    // agent
+    providers: [], provider: '', models: [], model: 'auto',
+    modelByProvider: {},
+    // chats
+    topics: [], activeTopic: null,
+    assistants: [], activeAssistant: 'agentbox',
+    attachments: [],
+    // paintings
+    paintings: [],
+    // browser
+    browser: { stream: null, running: false, available: true, url: '', title: '',
+               viewport: { width: 1280, height: 800 }, frames: 0, lastFrameAt: 0, fps: 0 },
     online: null,
+    historyTurns: 12,
   };
 
-  // ---- tiny DOM helper -----------------------------------------------------
+  // ---- tiny helpers -----------------------------------------------------------
 
   const $ = (id) => document.getElementById(id);
-  const on = (el, name, fn) => el && el.addEventListener(name, fn);
+  const on = (elx, name, fn, opts) => elx && elx.addEventListener(name, fn, opts);
   const store = {
     get(key, fallback) {
-      try { return global.localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
+      try { const v = global.localStorage.getItem(key); return v == null ? fallback : v; }
+      catch (e) { return fallback; }
     },
-    set(key, value) {
-      try { global.localStorage.setItem(key, value); } catch (e) { /* private mode */ }
+    getJSON(key, fallback) {
+      try { const v = global.localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+      catch (e) { return fallback; }
     },
+    set(key, value) { try { global.localStorage.setItem(key, value); } catch (e) { /* private mode */ } },
+    setJSON(key, value) { try { global.localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* */ } },
+    del(key) { try { global.localStorage.removeItem(key); } catch (e) { /* */ } },
   };
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
-  // ---- toasts --------------------------------------------------------------
-
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function btn(label, fn, cls) {
+    const node = el('button', cls || '', label);
+    node.type = 'button';
+    node.onclick = fn;
+    return node;
+  }
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
   function toast(text, cls) {
     const box = $('toasts');
     if (!box) return;
-    const el = document.createElement('div');
-    el.className = 'toast ' + (cls || '');
-    el.textContent = String(text == null ? '' : text);
-    box.appendChild(el);
-    setTimeout(() => el.remove(), cls === 'err' ? 7000 : 3800);
+    const node = el('div', 'toast ' + (cls || ''), String(text == null ? '' : text));
+    box.appendChild(node);
+    setTimeout(() => node.remove(), cls === 'err' ? 7000 : 3600);
+  }
+  function fileUrl(path) {
+    return `${AGENT}/files/${String(path).replace(/^\/+/, '')}` +
+      (state.token ? `?token=${encodeURIComponent(state.token)}` : '');
   }
 
+  // ---- transport ---------------------------------------------------------------
+
+  function headers(extra) {
+    const out = Object.assign({ 'content-type': 'application/json' }, extra || {});
+    if (state.token) out['X-Nova-Terminal-Token'] = state.token;
+    return out;
+  }
+  async function api(path, options) {
+    const opts = Object.assign({}, options || {});
+    opts.headers = headers(opts.headers);
+    let res = await fetch(path, opts);
+    if (res.status === 401 && !state.pendingToken) {
+      const token = askToken();
+      if (token) { state.token = token; opts.headers = headers(); res = await fetch(path, opts); }
+    }
+    return res;
+  }
+  async function json(path, options) {
+    const res = await api(path, options);
+    const body = await res.json().catch(() => ({}));
+    return { status: res.status, body };
+  }
+  function askToken() {
+    if (typeof prompt !== 'function') return '';
+    state.pendingToken = true;
+    const token = prompt('This terminal host requires its shared secret\n(AGENT_LINUX_TERMINAL_TOKEN):', state.token || '');
+    state.pendingToken = false;
+    if (token) store.set('agent_linux_token', token);
+    return token || '';
+  }
+  function rememberToken() { state.token = store.get('agent_linux_token', ''); }
+
+  // ---- link status ---------------------------------------------------------------
+
   function setLink(ok, text) {
-    const dot = $('dot');
-    const label = $('linkText');
+    const dot = $('dot'), label = $('linkText');
     if (dot) {
       dot.classList.toggle('bad', ok === false);
       dot.classList.toggle('warn', ok === null);
@@ -85,169 +154,27 @@
     if (label && text) label.textContent = text;
   }
 
-  function setAgentOrb(ok) {
-    const orb = $('adot');
-    if (!orb) return;
-    orb.classList.toggle('bad', ok === false);   // harmless if unsupported
-    orb.classList.toggle('on', ok === true);
-  }
-
-  function say(who, text, cls) {
-    const box = $('log');
-    if (!box) return null;
-    const el = document.createElement('div');
-    el.className = 'msg ' + (cls || '');
-    const label = document.createElement('span');
-    label.className = 'who';
-    label.textContent = who;
-    el.appendChild(label);
-    const body = document.createElement('span');
-    body.className = 'body';
-    body.innerHTML = cls === 'bot' || cls === 'you' ? renderLite(text) : escapeHtml(text);
-    el.appendChild(body);
-    box.appendChild(el);
-    box.scrollTop = box.scrollHeight;
-    return el;
-  }
-
-  function escapeHtml(value) {
-    return String(value == null ? '' : value)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  /**
-   * Markdown-lite: fenced code blocks and inline `code`, everything else
-   * escaped verbatim. A full parser would be a dependency; this is the 95%
-   * that actually shows up in agent replies.
-   */
-  function renderLite(text) {
-    const raw = String(text == null ? '' : text);
-    const parts = raw.split(/```/);
-    let html = '';
-    parts.forEach((chunk, i) => {
-      if (i % 2 === 1) {
-        html += '<pre class="codeblock">' + escapeHtml(chunk.replace(/^\w*\n/, '')) + '</pre>';
-      } else {
-        html += escapeHtml(chunk).replace(/`([^`\n]+)`/g, '<code>$1</code>');
-      }
-    });
-    return html;
-  }
-
-  /** A live "working" bubble with breathing dots; returns a remove() fn. */
-  function sayThinking() {
-    const box = $('log');
-    if (!box) return () => {};
-    const el = document.createElement('div');
-    el.className = 'msg bot';
-    const who = document.createElement('span');
-    who.className = 'who';
-    who.textContent = 'AGENTBOX · working';
-    const body = document.createElement('span');
-    body.className = 'body';
-    body.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
-    el.append(who, body);
-    box.appendChild(el);
-    box.scrollTop = box.scrollHeight;
-    return () => el.remove();
-  }
-
-  /**
-   * A visible reasoning card: what the agent is doing right now, a live tool
-   * trace that grows as steps land, and a timer. Returns handles to steer it.
-   */
-  function sayReasoning(label) {
-    const box = $('log');
-    if (!box) return { el: null, remove() {}, step() {}, done() {} };
-    const el = document.createElement('div');
-    el.className = 'msg reasoning';
-    const who = document.createElement('span');
-    who.className = 'who';
-    who.textContent = 'AGENTBOX · reasoning';
-    const status = document.createElement('div');
-    status.className = 'think-status';
-    const line = document.createElement('span');
-    line.className = 'think-line';
-    line.textContent = label || 'analysing the task…';
-    const timer = document.createElement('span');
-    timer.className = 'tagx';
-    timer.textContent = '0.0s';
-    const t0 = Date.now();
-    const tick = setInterval(() => { timer.textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's'; }, 100);
-    status.append(line, timer);
-    const trace = document.createElement('div');
-    trace.className = 'think-trace';
-    el.append(who, status, trace);
-    box.appendChild(el);
-    box.scrollTop = box.scrollHeight;
-    return {
-      el,
-      /** Log one tool step into the live trace. */
-      step(stepObj) {
-        trace.appendChild(stepCard(stepObj));
-        line.textContent = stepObj.tool === 'run_command' && stepObj.args && stepObj.args.command
-          ? `ran: ${String(stepObj.args.command).slice(0, 80)}`
-          : `called ${stepObj.tool || 'a tool'}`;
-        box.scrollTop = box.scrollHeight;
-      },
-      /** Freeze the timer and mark the card resolved. */
-      done(ok) {
-        clearInterval(tick);
-        el.classList.add('done');
-        line.textContent = ok === false ? 'ran into a problem — see below' : 'done — assembling the answer';
-        box.scrollTop = box.scrollHeight;
-      },
-      remove() {
-        clearInterval(tick);
-        el.remove();
-      },
-    };
-  }
-
-  // ---- transport -----------------------------------------------------------
-
-  function headers(extra) {
-    const out = Object.assign({ 'content-type': 'application/json' }, extra || {});
-    if (state.token) out['X-Nova-Terminal-Token'] = state.token;
-    return out;
-  }
-
-  async function api(path, options) {
-    const opts = Object.assign({}, options || {});
-    opts.headers = headers(opts.headers);
-    let res = await fetch(path, opts);
-    if (res.status === 401 && !state.pending) {
-      const token = askToken();                 // the host gates root shells
-      if (token) {
-        state.token = token;
-        opts.headers = headers();
-        res = await fetch(path, opts);
-      }
+  async function ping() {
+    const started = (global.performance && performance.now) ? performance.now() : Date.now();
+    try {
+      const res = await fetch('/health', { cache: 'no-store' });
+      if (!res.ok) throw new Error('http ' + res.status);
+      const body = await res.json().catch(() => ({}));
+      const ms = Math.round(((global.performance && performance.now) ? performance.now() : Date.now()) - started);
+      if ($('latency')) $('latency').textContent = ms + ' ms';
+      setLink(true, 'live');
+      state.online = true;
+    } catch (err) {
+      state.online = false;
+      if ($('latency')) $('latency').textContent = 'offline';
+      setLink(false, 'offline');
     }
-    return res;
   }
 
-  async function json(path, options) {
-    const res = await api(path, options);
-    const body = await res.json().catch(() => ({}));
-    return { status: res.status, body };
-  }
-
-  function askToken() {
-    if (typeof prompt !== 'function') return '';
-    const token = prompt('This terminal host requires its shared secret\n(NOVA_TERMINAL_TOKEN):', state.token || '');
-    if (token) store.set('agent_linux_token', token);
-    return token || '';
-  }
-
-  function rememberToken() {
-    state.token = store.get('agent_linux_token', '');
-  }
-
-  // ---- theme ---------------------------------------------------------------
+  // ---- theme ----------------------------------------------------------------------
 
   function applyTheme(name) {
-    state.theme = THEMES.indexOf(name) >= 0 ? name : 'obsidian';
+    state.theme = THEMES.indexOf(name) >= 0 ? name : 'cherry';
     document.documentElement.setAttribute('data-theme', state.theme);
     const pick = $('theme');
     if (pick) pick.value = state.theme;
@@ -255,12 +182,664 @@
     if (meta) meta.setAttribute('content', TERM_THEMES[state.theme].background);
     if (screen.term && screen.term.options) {
       screen.term.options.theme = TERM_THEMES[state.theme];
-      screen.term.refresh && screen.term.refresh(0, state.rows);
+      if (screen.term.refresh) screen.term.refresh(0, state.rows);
     }
     store.set('agent_linux_theme', state.theme);
   }
 
-  // ---- the shell screen ----------------------------------------------------
+  // ---- views -------------------------------------------------------------------------
+
+  const LIST_TITLES = { chats: 'Chats', terminal: 'Shells', browser: 'Quick links',
+                        paintings: 'Paintings', settings: 'Settings' };
+
+  function showView(name) {
+    state.view = VIEWS.indexOf(name) >= 0 ? name : 'chats';
+    document.querySelectorAll('.rbtn[data-view]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.view === state.view);
+    });
+    VIEWS.forEach((v) => { const node = $(v + 'View'); if (node) node.hidden = v !== state.view; });
+    const title = $('listTitle');
+    if (title) title.textContent = LIST_TITLES[state.view] || 'Agent_Linux';
+    const action = $('listAction');
+    if (action) {
+      action.hidden = state.view === 'settings';
+      action.textContent = state.view === 'paintings' ? '🎨' : '＋';
+      action.title = state.view === 'terminal' ? 'new shell'
+        : state.view === 'paintings' ? 'go to the prompt' : 'new chat';
+    }
+    renderList();
+    if (state.view === 'terminal') { screen.fit(); screen.focus(); postResize(); }
+    if (state.view === 'browser') ensureBrowserStream();
+    if (state.view === 'paintings') renderPaintings();
+    store.set('agent_linux_view', state.view);
+  }
+
+  /**
+   * The list column re-renders per view: topics under Chats, live shells under
+   * Terminal, quick links under Browser, the gallery under Paintings.
+   */
+  function renderList() {
+    const box = $('listScroll');
+    if (!box) return;
+    box.textContent = '';
+    const q = (($('listSearch') || {}).value || '').trim().toLowerCase();
+
+    if (state.view === 'chats') {
+      const groups = { today: [], earlier: [] };
+      const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+      state.topics.forEach((t) => {
+        if (q && !(t.title || '').toLowerCase().includes(q)) return;
+        (t.updatedAt >= dayStart.getTime() ? groups.today : groups.earlier).push(t);
+      });
+      const paint = (list, label) => {
+        if (!list.length) return;
+        box.append(el('div', 'lgroup', label));
+        list.forEach((t) => {
+          const item = el('button', 'litem' + (t.id === state.activeTopic ? ' active' : ''));
+          item.type = 'button';
+          const asst = state.assistants.find((a) => a.id === t.assistant);
+          item.append(el('span', 'ic', (asst && asst.emoji) || '💬'));
+          const wrap = el('span', 't');
+          wrap.append(el('span', '', t.title || 'untitled'));
+          wrap.append(el('span', 'sub', new Date(t.updatedAt).toLocaleString()));
+          item.append(wrap);
+          const del = el('span', 'del', '×');
+          del.setAttribute('role', 'button');
+          del.onclick = (e) => { e.stopPropagation(); deleteTopic(t.id); };
+          item.append(del);
+          item.onclick = () => { selectTopic(t.id); if (global.innerWidth <= 900) document.body.classList.remove('list-open'); };
+          box.append(item);
+        });
+      };
+      paint(groups.today, 'today');
+      paint(groups.earlier, 'earlier');
+      if (!state.topics.length) box.append(el('div', 'lgroup', 'no chats yet — press ＋'));
+    }
+
+    if (state.view === 'terminal') {
+      state.sessions.forEach((s) => {
+        if (q && !(`${s.label} ${s.cwd}`).toLowerCase().includes(q)) return;
+        const item = el('button', 'litem' + (s.id === state.active ? ' active' : ''));
+        item.type = 'button';
+        item.append(el('span', 'ic', s.closed ? '○' : '⌨'));
+        const wrap = el('span', 't');
+        wrap.append(el('span', '', s.label || s.id));
+        wrap.append(el('span', 'sub', s.cwd || (s.closed ? 'ended' : 'shell')));
+        item.append(wrap);
+        item.onclick = () => { if (!s.closed) select(s.id); };
+        box.append(item);
+      });
+      if (!state.sessions.filter((s) => !s.closed).length) {
+        box.append(el('div', 'lgroup', 'no shells — press ＋ or + shell'));
+      }
+    }
+
+    if (state.view === 'browser') {
+      box.append(el('div', 'lgroup', 'jump to'));
+      QUICK_LINKS.forEach((url) => {
+        const item = el('button', 'litem');
+        item.type = 'button';
+        item.append(el('span', 'ic', '🌐'));
+        item.append(el('span', 't', url));
+        item.onclick = () => { showView('browser'); browserGo(url); };
+        box.append(item);
+      });
+    }
+
+    if (state.view === 'paintings') {
+      const list = state.paintings.filter((p) => !q || (p.prompt || '').toLowerCase().includes(q));
+      box.append(el('div', 'lgroup', `${list.length} image${list.length === 1 ? '' : 's'}`));
+      list.forEach((p) => {
+        const item = el('button', 'litem');
+        item.type = 'button';
+        item.append(el('span', 'ic', '🖼'));
+        const wrap = el('span', 't');
+        wrap.append(el('span', '', p.prompt || 'untitled'));
+        wrap.append(el('span', 'sub', p.model || p.path || ''));
+        item.append(wrap);
+        item.onclick = () => openLightbox(p.url || fileUrl(p.path));
+        box.append(item);
+      });
+    }
+
+    if (state.view === 'settings') {
+      box.append(el('div', 'lgroup', 'appearance · providers · agent · data'));
+    }
+  }
+
+  // ---- topics (chats) --------------------------------------------------------------------
+
+  function loadChats() {
+    state.topics = store.getJSON('agent_linux_topics', []);
+    state.activeTopic = store.get('agent_linux_topic', '');
+    if (!state.topics.find((t) => t.id === state.activeTopic)) state.activeTopic = null;
+    if (!state.topics.length) newTopic(true);
+  }
+  function saveChats() {
+    store.setJSON('agent_linux_topics', state.topics.slice(0, 80));
+    store.set('agent_linux_topic', state.activeTopic || '');
+  }
+  function currentTopic() {
+    let t = state.topics.find((x) => x.id === state.activeTopic);
+    if (!t) t = newTopic(true);
+    return t;
+  }
+  function newTopic(quiet) {
+    const t = { id: uid(), title: 'New chat', createdAt: Date.now(), updatedAt: Date.now(),
+                assistant: state.activeAssistant, messages: [] };
+    state.topics.unshift(t);
+    state.activeTopic = t.id;
+    saveChats();
+    renderList();
+    renderChat();
+    if (!quiet) { showView('chats'); const input = $('input'); if (input) input.focus(); }
+    return t;
+  }
+  function deleteTopic(id) {
+    state.topics = state.topics.filter((t) => t.id !== id);
+    if (state.activeTopic === id) state.activeTopic = state.topics[0] ? state.topics[0].id : null;
+    if (!state.topics.length) newTopic(true);
+    saveChats();
+    renderList();
+    renderChat();
+    toast('chat deleted');
+  }
+  function selectTopic(id) {
+    state.activeTopic = id;
+    const t = currentTopic();
+    if (t.assistant) state.activeAssistant = t.assistant;
+    saveChats();
+    renderList();
+    renderChat();
+    renderAssistantPick();
+  }
+  function addMsg(topic, role, content, extra) {
+    const msg = Object.assign({ role, content, ts: Date.now() }, extra || {});
+    topic.messages.push(msg);
+    topic.updatedAt = Date.now();
+    if (role === 'user' && (topic.title === 'New chat' || !topic.title)) {
+      topic.title = content.slice(0, 48) + (content.length > 48 ? '…' : '');
+    }
+    saveChats();
+    return msg;
+  }
+
+  // ---- chat rendering -----------------------------------------------------------------------
+
+  function renderLite(text) {
+    const raw = String(text == null ? '' : text);
+    const parts = raw.split(/```/);
+    let html = '';
+    parts.forEach((chunk, i) => {
+      if (i % 2 === 1) {
+        const code = escapeHtml(chunk.replace(/^\w*\n/, ''));
+        html += '<pre class="codeblock">' + code +
+          '<button type="button" class="code-copy">copy</button></pre>';
+      } else {
+        html += escapeHtml(chunk).replace(/`([^`\n]+)`/g, '<code>$1</code>');
+      }
+    });
+    return html;
+  }
+
+  function msgNode(msg) {
+    const node = el('div', 'msg ' + (msg.role === 'user' ? 'you' : 'bot'));
+    const who = el('span', 'who', (msg.role === 'user' ? 'YOU' : 'AGENTBOX') +
+      ' · ' + new Date(msg.ts || Date.now()).toLocaleTimeString());
+    node.append(who);
+    const body = el('span', 'body');
+    body.innerHTML = renderLite(msg.content);
+    node.append(body);
+    if (msg.imgs && msg.imgs.length) {
+      const imgs = el('div', 'imgs');
+      msg.imgs.forEach((src) => {
+        const img = el('img');
+        img.src = src; img.alt = 'generated image'; img.loading = 'lazy';
+        img.onclick = () => openLightbox(src);
+        imgs.append(img);
+      });
+      node.append(imgs);
+    }
+    if (msg.role === 'assistant') {
+      const regen = el('button', 'regen', '↻');
+      regen.title = 'regenerate';
+      regen.onclick = () => regenerate();
+      node.append(regen);
+    }
+    const copy = el('button', 'copy', 'copy');
+    copy.onclick = () => {
+      if (global.navigator && navigator.clipboard) navigator.clipboard.writeText(msg.content).then(() => toast('copied', 'ok'));
+    };
+    node.append(copy);
+    return node;
+  }
+
+  function renderChat() {
+    const inner = $('chatInner');
+    if (!inner) return;
+    inner.textContent = '';
+    const topic = currentTopic();
+    topic.messages.forEach((m) => inner.append(msgNode(m)));
+    if (!topic.messages.length) {
+      const hello = el('div', 'msg bot');
+      hello.append(el('span', 'who', 'AGENTBOX'));
+      const body = el('span', 'body');
+      body.innerHTML = renderLite(
+        'New chat ready. I run in a real root shell — ask me to inspect, build, deploy or fix something, and every command lands in a terminal tab you can watch.\n\nTry:\n• `what is running here?`\n• `set up a python venv and install requests`\n• `check disk and memory, then tail the newest log`');
+      hello.append(body);
+      inner.append(hello);
+    }
+    const box = $('chatMessages');
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+
+  /** A visible reasoning card with a live tool trace and a timer. */
+  function sayReasoning(label) {
+    const inner = $('chatInner');
+    if (!inner) return { el: null, remove() {}, step() {}, done() {} };
+    const card = el('div', 'msg reasoning');
+    card.append(el('span', 'who', 'AGENTBOX · working'));
+    const status = el('div', 'think-status');
+    const line = el('span', 'think-line', label || 'analysing the task…');
+    const timer = el('span', 'tagx', '0.0s');
+    const t0 = Date.now();
+    const tick = setInterval(() => { timer.textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's'; }, 100);
+    status.append(line, timer);
+    const trace = el('div', 'think-trace');
+    card.append(status, trace);
+    inner.append(card);
+    const box = $('chatMessages');
+    if (box) box.scrollTop = box.scrollHeight;
+    return {
+      el: card,
+      step(stepObj) {
+        trace.append(stepCard(stepObj));
+        line.textContent = stepObj.tool === 'run_command' && stepObj.args && stepObj.args.command
+          ? `ran: ${String(stepObj.args.command).slice(0, 80)}`
+          : `called ${stepObj.tool || 'a tool'}`;
+        if (box) box.scrollTop = box.scrollHeight;
+      },
+      done(ok) {
+        clearInterval(tick);
+        card.classList.add('done');
+        line.textContent = ok === false ? 'ran into a problem — see below' : 'done — assembling the answer';
+      },
+      remove() { clearInterval(tick); card.remove(); },
+    };
+  }
+
+  function stepCard(step) {
+    const details = el('details', 'step');
+    details.setAttribute('data-tool', String(step.tool || ''));
+    const summary = el('summary');
+    const cmd = step.args && step.args.command;
+    summary.textContent = step.tool === 'run_command' && cmd ? `$ ${cmd}` : String(step.tool || 'step');
+    const pre = el('pre');
+    const result = step.result && step.result.output != null ? step.result.output : JSON.stringify(step.result);
+    pre.textContent = String(result == null ? '' : result).slice(0, 4000);
+    details.append(summary, pre);
+    return details;
+  }
+
+  // ---- composer: state, attachments, assistants, models -----------------------------------
+
+  function setComposerState(mode) {
+    const tag = $('cmState');
+    const send = $('sendBtn');
+    const input = $('input');
+    if (tag) {
+      tag.textContent = mode === 'working' ? 'thinking…' : 'ready';
+      tag.classList.toggle('acc', mode === 'working');
+    }
+    if (send) send.disabled = mode === 'working';
+    if (mode === 'working' && input) input.placeholder = 'the agent is working — you can keep typing…';
+    else if (input) input.placeholder = 'describe the task — the agent plans, runs commands and reports back…';
+  }
+  function autosize(node) {
+    if (!node) return;
+    node.style.height = 'auto';
+    node.style.height = Math.min(node.scrollHeight, 200) + 'px';
+  }
+  function renderAttachments() {
+    const box = $('attPreview');
+    if (!box) return;
+    box.textContent = '';
+    state.attachments.forEach((a, i) => {
+      const chip = el('span', 'chip');
+      chip.append(el('span', '', (a.name || a.path) + (a.bytes ? ' · ' + Math.round(a.bytes / 1024) + 'kB' : '')));
+      const x = el('button', '', '×');
+      x.onclick = () => { state.attachments.splice(i, 1); renderAttachments(); };
+      chip.append(x);
+      box.append(chip);
+    });
+  }
+  async function uploadAttachment(file) {
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file, file.name);
+    const res = await fetch(`${AGENT}/files/upload`, { method: 'POST', headers: headers(), body: form });
+    const body = await res.json().catch(() => ({}));
+    if (res.status !== 200 || !body.ok) { toast(body.error || `upload failed (HTTP ${res.status})`, 'err'); return; }
+    state.attachments.push(body);
+    renderAttachments();
+    toast(`attached ${body.name}`, 'ok');
+  }
+
+  function renderAssistantPick() {
+    const pick = $('assistantPick');
+    if (!pick) return;
+    pick.textContent = '';
+    state.assistants.forEach((a) => {
+      const opt = el('option', '', `${a.emoji || '🤖'} ${a.name}`);
+      opt.value = a.id;
+      if (a.id === state.activeAssistant) opt.selected = true;
+      pick.append(opt);
+    });
+    const t = state.topics.find((x) => x.id === state.activeTopic);
+    if (t) { t.assistant = state.activeAssistant; saveChats(); }
+  }
+  function activeAssistant() {
+    return state.assistants.find((a) => a.id === state.activeAssistant) || state.assistants[0];
+  }
+
+  function renderAssistantEditor() {
+    const box = $('asstList');
+    if (!box) return;
+    box.textContent = '';
+    state.assistants.forEach((a) => {
+      const card = el('div', 'item' + (a.id === state.activeAssistant ? ' on' : ''));
+      const top = el('div', 'top');
+      top.append(el('b', '', `${a.emoji || '🤖'} ${a.name}`));
+      top.append(el('span', 'grow'));
+      top.append(btn(a.id === state.activeAssistant ? 'active' : 'use', () => {
+        state.activeAssistant = a.id;
+        store.set('agent_linux_assistant', a.id);
+        renderAssistantPick(); renderAssistantEditor(); renderList();
+      }, a.id === state.activeAssistant ? '' : 'primary'));
+      card.append(top);
+      card.append(el('div', 'meta', a.prompt ? a.prompt.slice(0, 180) + (a.prompt.length > 180 ? '…' : '') : 'no persona — uses the built-in prompt'));
+      card.append(btn('edit', () => {
+        $('as_name').value = a.name;
+        $('as_emoji').value = a.emoji || '';
+        $('as_prompt').value = a.prompt || '';
+        $('asstForm').dataset.editing = a.id;
+        toast(`editing ${a.name}`);
+      }));
+      box.append(card);
+    });
+  }
+  function saveAssistantForm(form) {
+    const name = $('as_name').value.trim();
+    if (!name) { toast('a name is required', 'err'); return; }
+    const emoji = $('as_emoji').value.trim();
+    const promptText = $('as_prompt').value;
+    const editing = form.dataset.editing || '';
+    let rec = state.assistants.find((a) => a.id === editing) ||
+              state.assistants.find((a) => a.name === name);
+    if (rec) {
+      rec.name = name; rec.emoji = emoji; rec.prompt = promptText;
+    } else {
+      rec = { id: 'as-' + uid(), name, emoji, prompt: promptText };
+      state.assistants.push(rec);
+    }
+    form.dataset.editing = '';
+    store.setJSON('agent_linux_assistants', state.assistants);
+    renderAssistantEditor();
+    renderAssistantPick();
+    toast(`assistant ${name} saved`, 'ok');
+  }
+
+  // ---- providers + models ---------------------------------------------------------------------
+
+  async function loadProviders() {
+    const { status, body } = await json(`${AGENT}/providers`);
+    if (status === 401 || !body || !body.providers) return;
+    state.providers = body.providers;
+    state.provider = body.active || (state.providers[0] && state.providers[0].id) || '';
+    state.model = state.modelByProvider[state.provider] || 'auto';
+    const pick = $('providerPick');
+    if (pick) {
+      pick.textContent = '';
+      state.providers.forEach((p) => {
+        const opt = el('option', '', p.label || p.id);
+        opt.value = p.id;
+        if (p.id === state.provider) opt.selected = true;
+        pick.append(opt);
+      });
+    }
+    renderProviders();
+    loadLocalEngines();
+    loadModels();
+    renderList();
+  }
+
+  function renderProviders() {
+    const box = $('provList');
+    if (!box) return;
+    box.textContent = '';
+    state.providers.forEach((p) => {
+      const row = el('div', 'prov' + (p.id === state.provider ? ' active' : ''));
+      row.append(el('b', '', p.id));
+      row.append(el('span', 'u', `${p.base_url}${p.model ? ' · ' + p.model : ''}${p.has_key ? ' · ' + p.api_key : ''}`));
+      row.append(btn(p.id === state.provider ? 'active' : 'use', () => {
+        state.provider = p.id;
+        state.model = state.modelByProvider[p.id] || 'auto';
+        const pick = $('providerPick');
+        if (pick) pick.value = p.id;
+        renderProviders();
+        loadModels();
+        toast(`provider → ${p.id}`, 'ok');
+      }));
+      row.append(btn('×', async () => {
+        await api(`${AGENT}/providers/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+        loadProviders();
+      }));
+      box.append(row);
+    });
+  }
+
+  async function loadModels() {
+    const pick = $('modelPick');
+    if (!pick) return;
+    pick.textContent = '';
+    const auto = el('option', '', 'model: auto');
+    auto.value = 'auto';
+    pick.append(auto);
+    if (!state.provider) return;
+    const { status, body } = await json(`${AGENT}/models?provider=${encodeURIComponent(state.provider)}`);
+    state.models = (status === 200 && body && body.models) || [];
+    state.models.slice(0, 60).forEach((m) => {
+      const opt = el('option', '', m);
+      opt.value = m;
+      pick.append(opt);
+    });
+    pick.value = state.model && state.models.indexOf(state.model) >= 0 ? state.model : 'auto';
+  }
+
+  async function saveProviderForm() {
+    const payload = {
+      id: $('p_id').value.trim(),
+      base_url: $('p_url').value.trim(),
+      model: $('p_model').value.trim(),
+      api_key: $('p_key').value,
+    };
+    const { status, body } = await json(`${AGENT}/providers`, { method: 'POST', body: JSON.stringify(payload) });
+    if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    $('p_key').value = '';
+    state.provider = body.provider.id;
+    loadProviders();
+    toast(`provider ${body.provider.id} saved`, 'ok');
+  }
+
+  async function loadLocalEngines() {
+    const box = $('localEngines');
+    if (!box) return;
+    const { body } = await json(`${AGENT}/local-engines`);
+    if (!body || !body.ok) return;
+    box.textContent = '';
+    (body.engines || []).forEach((e) => {
+      const row = el('div', 'engine');
+      row.append(el('b', '', e.engine));
+      const count = (e.models || []).length;
+      row.append(el('span', 'meta', e.configured ? 'already configured'
+        : `${count} model${count === 1 ? '' : 's'} · ${e.models && e.models[0] ? e.models[0] : ''}`));
+      if (!e.configured) {
+        row.append(btn('add', async () => {
+          const { status, body: saved } = await json(`${AGENT}/local-engines/add`, {
+            method: 'POST',
+            body: JSON.stringify({ engine: e.engine, base_url: e.base_url, model: (e.models || [])[0] || '' }),
+          });
+          if (status !== 200 || !saved.ok) { toast((saved && saved.error) || 'could not add', 'err'); return; }
+          toast(`${e.engine} added — prompts stay on this machine`, 'ok');
+          loadProviders();
+        }));
+      }
+      box.append(row);
+    });
+  }
+
+  // ---- the ask flow -----------------------------------------------------------------------------
+
+  function historyForApi() {
+    const topic = currentTopic();
+    return topic.messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-state.historyTurns * 2)
+      .map((m) => ({ role: m.role, content: m.content }));
+  }
+
+  async function ask(message, opts) {
+    const options = opts || {};
+    const topic = currentTopic();
+    if (!options.skipUser) addMsg(topic, 'user', message);
+    renderChat();
+    setComposerState('working');
+    const think = sayReasoning(options.skipUser ? 'rethinking the last answer…' : 'analysing the task…');
+
+    const payload = { message, history: historyForApi(), provider: state.provider || undefined };
+    if (state.model && state.model !== 'auto') payload.model = state.model;
+    const asst = activeAssistant();
+    if (asst && asst.prompt && asst.prompt.trim()) payload.system = asst.prompt.trim();
+    if (state.attachments.length) {
+      const mention = state.attachments
+        .map((a) => `[attached ${a.name || 'file'}: ${a.path}]`)
+        .join('\n');
+      payload.message = `${message}\n\n${mention}`;
+      state.attachments = [];
+      renderAttachments();
+    }
+
+    const { status, body } = await json(`${AGENT}/chat`, {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+    if (status !== 200 || !body.ok) {
+      think.done(false);
+      const text = body.error || `HTTP ${status}`;
+      addMsg(topic, 'assistant', '⚠ ' + text);
+      renderChat();
+      toast(text, 'err');
+      setComposerState('ready');
+      return;
+    }
+    (body.steps || []).forEach((s) => think.step(s));
+    think.done(true);
+    // Screenshots the agent took land as viewable images on the reply.
+    const imgs = (body.steps || [])
+      .map((s) => s.result && s.result.path)
+      .filter((p) => typeof p === 'string' && /\.(png|jpe?g)$/i.test(p))
+      .map((p) => fileUrl(p));
+    addMsg(topic, 'assistant', body.reply || '(no reply)', { imgs: imgs.length ? imgs : undefined });
+    renderChat();
+    setComposerState('ready');
+    loadSessions();
+    renderList();
+  }
+
+  function regenerate() {
+    const topic = currentTopic();
+    while (topic.messages.length && topic.messages[topic.messages.length - 1].role === 'assistant') {
+      topic.messages.pop();
+    }
+    const lastUser = [].concat(topic.messages).reverse().find((m) => m.role === 'user');
+    if (!lastUser) { toast('nothing to regenerate', 'err'); return; }
+    saveChats();
+    ask(lastUser.content, { skipUser: true });
+  }
+
+  // ---- paintings -----------------------------------------------------------------------------------
+
+  function loadPaintings() {
+    state.paintings = store.getJSON('agent_linux_paintings', []);
+  }
+  function savePaintings() {
+    store.setJSON('agent_linux_paintings', state.paintings.slice(0, 200));
+  }
+  function renderPaintings() {
+    const grid = $('paintingsGrid');
+    const empty = $('paintEmpty');
+    if (!grid) return;
+    grid.textContent = '';
+    if (empty) empty.hidden = state.paintings.length > 0;
+    state.paintings.forEach((p) => {
+      const card = el('div', 'pcard');
+      const img = el('img');
+      img.loading = 'lazy';
+      img.src = p.url || fileUrl(p.path);
+      img.alt = p.prompt || 'painting';
+      img.onclick = () => openLightbox(img.src);
+      card.append(img);
+      const meta = el('div', 'pmeta');
+      meta.title = p.prompt || '';
+      meta.append(el('span', '', `${p.model || 'image'} · ${new Date(p.ts || Date.now()).toLocaleDateString()}`));
+      meta.append(el('span', 'grow'));
+      const copyPath = btn('⧉', () => {
+        const text = p.path || p.url || '';
+        if (global.navigator && navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('path copied', 'ok'));
+      });
+      copyPath.title = 'copy workspace path';
+      meta.append(copyPath);
+      card.append(meta);
+      grid.append(card);
+    });
+    const prov = $('paintProv');
+    if (prov) prov.textContent = 'provider: ' + (state.provider || '—');
+  }
+  async function generatePainting() {
+    const input = $('paintPrompt');
+    const prompt = ((input && input.value) || '').trim();
+    if (!prompt) { toast('describe the image first', 'err'); return; }
+    const go = $('paintGo');
+    if (go) { go.disabled = true; go.textContent = 'painting…'; }
+    const { status, body } = await json(`${AGENT}/images/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt, size: ($('paintSize') || {}).value || '1024x1024', provider: state.provider || undefined }),
+    });
+    if (go) { go.disabled = false; go.textContent = 'generate'; }
+    if (status !== 200 || !body.ok) { toast(body.error || `HTTP ${status}`, 'err'); return; }
+    (body.images || []).forEach((img) => {
+      state.paintings.unshift({ path: img.path, url: img.url, prompt: body.revised_prompt || prompt,
+                                model: body.model, ts: Date.now() });
+    });
+    savePaintings();
+    renderPaintings();
+    renderList();
+    toast(`${(body.images || []).length} image(s) ready`, 'ok');
+  }
+
+  // ---- lightbox ---------------------------------------------------------------------------------------
+
+  function openLightbox(src) {
+    const box = $('lightbox'), img = $('lightboxImg');
+    if (!box || !img) return;
+    img.src = src;
+    box.hidden = false;
+  }
+  function closeLightbox() {
+    const box = $('lightbox');
+    if (box) box.hidden = true;
+  }
+
+  // ---- terminal -------------------------------------------------------------------------------
 
   const screen = {
     term: null,
@@ -270,8 +849,7 @@
       if (this.plain) { this.plain.textContent += data; this.plain.scrollTop = this.plain.scrollHeight; }
     },
     resize(cols, rows) {
-      state.cols = cols;
-      state.rows = rows;
+      state.cols = cols; state.rows = rows;
       if (this.term && this.term.resize) this.term.resize(cols, rows);
     },
     clear() {
@@ -288,14 +866,10 @@
     const TerminalCtor = global.Terminal;
     if (TerminalCtor) {
       screen.term = new TerminalCtor({
-        convertEol: false,
-        cursorBlink: true,
-        cursorStyle: 'bar',
-        fontSize: 13,
-        lineHeight: 1.25,
+        convertEol: false, cursorBlink: true, cursorStyle: 'bar',
+        fontSize: 13, lineHeight: 1.25,
         fontFamily: '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
-        scrollback: 5000,
-        allowProposedApi: true,
+        scrollback: 5000, allowProposedApi: true,
         theme: TERM_THEMES[state.theme],
       });
       screen.term.open(host);
@@ -306,19 +880,14 @@
       }
       screen.term.onData((data) => send(data));
     } else {
-      // No CDN: still a usable terminal, just without emulation.
-      const note = document.createElement('div');
-      note.className = 'screen-note';
-      note.textContent = 'xterm.js unavailable — plain viewer (no colour, no full-screen apps)';
-      host.appendChild(note);
-      const pre = document.createElement('pre');
-      pre.className = 'plain';
+      const note = el('div', 'screen-note',
+        'xterm.js unavailable — plain viewer (no colour, no full-screen apps)');
+      host.append(note);
+      const pre = el('pre', 'plain');
       pre.setAttribute('aria-label', 'terminal output');
-      host.appendChild(pre);
+      host.append(pre);
       screen.plain = pre;
       host.setAttribute('tabindex', '0');
-      // Named keys first: `Enter`.length is 5, so a printable-char test would
-      // silently drop the most important key on the keyboard.
       const NAMED = {
         Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b',
         ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D',
@@ -360,8 +929,6 @@
       .catch(() => {});
   }
 
-  // ---- sessions ------------------------------------------------------------
-
   async function loadSessions() {
     let status, body;
     try {
@@ -377,13 +944,11 @@
     state.sessions = (body && body.sessions) || [];
     state.max = (body && body.max_sessions) || state.max;
     renderTabs();
+    renderList();  // the terminal list mirrors the tabs
     const live = state.sessions.filter((s) => !s.closed);
     if (!state.active || !live.some((s) => s.id === state.active)) {
       const preferred = live.find((s) => s.active) || live[0];
       if (preferred) select(preferred.id);
-    } else {
-      const focused = live.find((s) => s.active);
-      if (focused && focused.id !== state.active) select(focused.id);
     }
   }
 
@@ -392,57 +957,27 @@
     if (!box) return;
     box.textContent = '';
     state.sessions.forEach((s) => {
-      const tab = document.createElement('button');
+      const tab = el('button', 'tab' + (s.id === state.active ? ' active' : '') + (s.closed ? ' closed' : ''));
       tab.type = 'button';
-      tab.className = 'tab' + (s.id === state.active ? ' active' : '') + (s.closed ? ' closed' : '');
       tab.setAttribute('role', 'tab');
       tab.setAttribute('aria-selected', String(s.id === state.active));
-
-      const name = document.createElement('span');
-      name.textContent = s.label || s.id;
-      tab.appendChild(name);
-
-      const cwd = document.createElement('em');
-      cwd.textContent = s.cwd || '';
-      tab.appendChild(cwd);
-
-      const close = document.createElement('span');
-      close.className = 'x';
-      close.textContent = '×';
-      close.setAttribute('role', 'button');
-      close.setAttribute('aria-label', 'close ' + (s.label || s.id));
-      close.onclick = (e) => { e.stopPropagation(); closeSession(s.id); };
-      tab.appendChild(close);
-
+      tab.append(el('span', '', s.label || s.id));
+      tab.append(el('em', '', s.cwd || ''));
+      const x = el('span', 'x', '×');
+      x.onclick = (e) => { e.stopPropagation(); closeSession(s.id); };
+      tab.append(x);
       tab.onclick = () => {
-        if (s.closed) { toast(`“${s.label || s.id}” already ended`, 'err'); return; }
+        if (s.closed) { toast(`"${s.label || s.id}" already ended`, 'err'); return; }
         api(`${API}/activate`, { method: 'POST', body: JSON.stringify({ session: s.id }) }).catch(() => {});
         select(s.id);
       };
       tab.ondblclick = () => renameSession(s);
-      box.appendChild(tab);
+      box.append(tab);
     });
     const count = $('count');
     if (count) count.textContent = `${state.sessions.length}/${state.max || 8}`;
-    // Disable rather than warn: a cap you cannot cross is clearer than a toast
-    // that repeats on every poll.
     const newBtn = $('new');
     if (newBtn) newBtn.disabled = state.sessions.length >= (state.max || 8);
-  }
-
-  function updateStatusbar() {
-    const here = state.sessions.find((s) => s.id === state.active);
-    const left = $('sbSession');
-    if (left) {
-      left.textContent = here
-        ? `${here.label || here.id}${here.cwd ? ' · ' + here.cwd : ''}`
-        : 'no shell focused';
-    }
-    const prov = $('sbProv');
-    if (prov) prov.textContent = state.provider ? 'agent: ' + state.provider : 'agent: —';
-    const lat = $('sbLat');
-    const top = $('latency');
-    if (lat && top) lat.textContent = top.textContent;
   }
 
   function select(id) {
@@ -451,36 +986,19 @@
     state.offset = 0;
     screen.clear();
     renderTabs();
+    renderList();
     attach();
     screen.focus();
     const here = state.sessions.find((s) => s.id === id);
-    const hint = $('where');
-    if (hint) hint.textContent = here ? (here.cwd || '') : '';
-    renderEmptyState();
-    updateStatusbar();
-  }
-
-  function renderEmptyState() {
-    const host = $('screen');
-    if (!host) return;
-    const has = state.sessions.some((s) => !s.closed);
-    let box = host.querySelector('.empty');
-    if (has) { if (box) box.remove(); return; }
-    if (box) return;
-    box = document.createElement('div');
-    box.className = 'empty';
-    box.innerHTML = '<div class="box"><h2>NO SHELL OPEN</h2>' +
-      '<p>Open a root shell to start working — it stays alive while you are away, and every agent command runs in one you can watch.</p>' +
-      '<button type="button" class="primary" id="emptyNew">+ open a shell</button></div>';
-    host.appendChild(box);
-    on($('emptyNew'), 'click', newSession);
+    if ($('where')) $('where').textContent = here ? (here.cwd || '') : '';
   }
 
   function attach() {
     if (state.stream && state.stream.close) state.stream.close();
     state.stream = null;
     if (!state.active) return;
-    const source = new EventSource(`${API}/stream?session=${encodeURIComponent(state.active)}&offset=${state.offset}`);
+    const token = state.token ? `&token=${encodeURIComponent(state.token)}` : '';
+    const source = new EventSource(`${API}/stream?session=${encodeURIComponent(state.active)}&offset=${state.offset}${token}`);
     state.stream = source;
     source.onmessage = (e) => {
       let data;
@@ -489,6 +1007,7 @@
     };
     source.onerror = () => {
       source.close();
+      state.stream = null;
       if (!state.active) return;
       // The host restarts shells and the network blips: back off instead of
       // hammering a socket that is not there.
@@ -504,16 +1023,14 @@
       state.offset += data.o.length;
       screen.write(data.o);
     }
-    if (data.error) { say('TERMINAL', data.error, 'err'); toast(data.error, 'err'); }
+    if (data.error) { toast(data.error, 'err'); }
     if (data.cwd) {
-      const hint = $('where');
-      if (hint) hint.textContent = data.cwd;
+      if ($('where')) $('where').textContent = data.cwd;
       const here = state.sessions.find((s) => s.id === (data.session || state.active));
       if (here) { here.cwd = data.cwd; renderTabs(); }
-      updateStatusbar();
     }
     if (data.done) {
-      say('TERMINAL', `session ended (exit ${data.exit == null ? 0 : data.exit})`);
+      toast(`session ended (exit ${data.exit == null ? 0 : data.exit})`);
       loadSessions();
     }
   }
@@ -534,484 +1051,45 @@
     if (state.active === id) { state.active = null; state.offset = 0; screen.clear(); }
     await loadSessions();
     if (body && body.ok) toast('shell closed');
-    updateStatusbar();
   }
 
   function renameSession(session) {
     const label = global.prompt ? prompt('tab name', session.label || '') : null;
     if (!label) return;
     api(`${API}/rename`, {
-      method: 'POST',
-      body: JSON.stringify({ session: session.id, label }),
+      method: 'POST', body: JSON.stringify({ session: session.id, label }),
     }).then(loadSessions).catch(() => {});
   }
-
   function renameActive() {
     const s = state.sessions.find((x) => x.id === state.active && !x.closed);
     if (s) renameSession(s); else toast('no focused shell', 'err');
   }
 
-  // ---- health / latency ----------------------------------------------------
-
-  async function ping() {
-    const started = (global.performance && performance.now) ? performance.now() : Date.now();
-    try {
-      const res = await fetch('/health', { cache: 'no-store' });
-      if (!res.ok) throw new Error('http ' + res.status);
-      const body = await res.json().catch(() => ({}));
-      const ms = Math.round(((global.performance && performance.now) ? performance.now() : Date.now()) - started);
-      const el = $('latency');
-      if (el) el.textContent = ms + ' ms';
-      const lat = $('sbLat');
-      if (lat) lat.textContent = ms + ' ms';
-      const hint = $('agentHint');
-      if (hint && body && body.agentbox) {
-        hint.textContent = body.agentbox.configured
-          ? 'Every command the agent runs appears in a shell tab you can watch.'
-          : 'No model provider configured yet — open ⚙ to add one (any OpenAI-compatible endpoint).';
-      }
-      setAgentOrb(!!(body.agentbox && body.agentbox.configured));
-    } catch (err) {
-      const el = $('latency');
-      if (el) el.textContent = 'offline';
-      setLink(false, 'offline');
-      setAgentOrb(false);
-    }
-  }
-
-  // ---- Agentbox ------------------------------------------------------------
-
-async function loadProviders() {
-    const { status, body } = await json(`${AGENT}/providers`);
-    if (status === 401 || !body || !body.providers) return;
-    state.providers = body.providers;
-    state.provider = body.active || (state.providers[0] && state.providers[0].id) || '';
-    const pick = $('provider');
-    if (pick) {
-      pick.textContent = '';
-      state.providers.forEach((p) => {
-        const opt = document.createElement('option');
-        opt.value = p.id;
-        opt.textContent = p.label || p.id;
-        if (p.id === state.provider) opt.selected = true;
-        pick.appendChild(opt);
-      });
-      pick.hidden = state.providers.length < 2;
-    }
-    renderProviders(body);
-    loadLocalEngines();
-    const dot = $('adot');
-    if (dot) dot.classList.toggle('bad', !state.providers.length);
-    renderChips();
-    updateStatusbar();
-  }
-
-  // ---- local engines (privacy mode helpers) --------------------------------
-  async function loadLocalEngines() {
-    const box = $('localEngines');
-    if (!box) return;
-    const { body } = await json(`${AGENT}/local-engines`);
-    if (!body || !body.ok) return;
-    box.textContent = '';
-    (body.engines || []).forEach((e) => {
-      const row = document.createElement('div');
-      row.className = 'engine';
-      const name = document.createElement('b');
-      name.textContent = e.engine;
-      const meta = document.createElement('span');
-      meta.className = 'meta';
-      const count = (e.models || []).length;
-      meta.textContent = e.configured
-        ? 'already configured'
-        : `${count} model${count === 1 ? '' : 's'} · ${e.models && e.models[0] ? e.models[0] : ''}`;
-      row.append(name, meta);
-      if (!e.configured) {
-        const add = document.createElement('button');
-        add.type = 'button';
-        add.textContent = 'add';
-        add.onclick = async () => {
-          const { status, body: saved } = await json(`${AGENT}/local-engines/add`, {
-            method: 'POST',
-            body: JSON.stringify({ engine: e.engine, base_url: e.base_url, model: (e.models || [])[0] || '' }),
-          });
-          if (status !== 200 || !saved.ok) {
-            toast((saved && saved.error) || 'could not add', 'err');
-            return;
-          }
-          toast(`${e.engine} added as a provider — prompts now stay on this machine`, 'ok');
-          loadProviders();
-        };
-        row.appendChild(add);
-      } else {
-        const done = document.createElement('span');
-        done.textContent = '✓';
-        row.appendChild(done);
-      }
-      box.appendChild(row);
-    });
-  }
-
-  function renderProviders(body) {
-    const box = $('provList');
-    if (!box) return;
-    box.textContent = '';
-    (body.providers || []).forEach((p) => {
-      const row = document.createElement('div');
-      row.className = 'prov' + (p.id === state.provider ? ' active' : '');
-
-      const name = document.createElement('b');
-      name.textContent = p.id;
-      const url = document.createElement('span');
-      url.className = 'u';
-      url.textContent = `${p.base_url}${p.model ? ' · ' + p.model : ''}${p.has_key ? ' · ' + p.api_key : ''}`;
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.textContent = '×';
-      del.setAttribute('aria-label', 'remove ' + p.id);
-      del.onclick = async () => {
-        await api(`${AGENT}/providers/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
-        loadProviders();
-      };
-      row.append(name, url, del);
-      box.appendChild(row);
-    });
-    const where = $('registry');
-    if (where) where.textContent = body.registry || '';
-  }
-
-  function renderChips() {
-    const box = $('chips');
-    if (!box) return;
-    box.textContent = '';
-    const suggestions = state.providers.length
-      ? ['what is running here?', 'install ffmpeg and check the version', 'show disk and memory usage', 'set up a python venv and install requests']
-      : ['add a provider to enable the agent'];
-    suggestions.forEach((text) => {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = 'chip';
-      chip.textContent = text;
-      chip.onclick = () => {
-        if (!state.providers.length) { const p = $('providerBox'); if (p) { p.hidden = false; loadProviders(); } return; }
-        const input = $('input');
-        if (input) { input.value = text; input.focus(); }
-      };
-      box.appendChild(chip);
-    });
-  }
-
-  function stepCard(step) {
-    const details = document.createElement('details');
-    details.className = 'step';
-    details.setAttribute('data-tool', String(step.tool || ''));
-    const summary = document.createElement('summary');
-    const cmd = step.args && step.args.command;
-    summary.textContent = step.tool === 'run_command' && cmd ? `$ ${cmd}` : String(step.tool || 'step');
-    const pre = document.createElement('pre');
-    const result = step.result && step.result.output != null ? step.result.output : JSON.stringify(step.result);
-    pre.textContent = String(result == null ? '' : result).slice(0, 4000);
-    details.append(summary, pre);
-    return details;
-  }
-
-  async function ask(message) {
-    say('YOU', message, 'you');
-    setComposerState('working');
-    const think = sayReasoning('analysing the task…');
-    const { status, body } = await json(`${AGENT}/chat`, {
-      method: 'POST',
-      body: JSON.stringify({ message, history: state.history, provider: state.provider || undefined }),
-    });
-    if (status !== 200 || !body.ok) {
-      think.done(false);
-      const text = body.error || `HTTP ${status}`;
-      say('AGENTBOX', text, 'err');
-      toast(text, 'err');
-      setComposerState('ready');
-      return;
-    }
-    // Steps stream into the reasoning trace as they arrive — the thinking is
-    // visible, not hidden behind a spinner.
-    (body.steps || []).forEach((step) => { think.step(step); });
-    think.done(true);
-    const reply = say('AGENTBOX', body.reply || '(no reply)', 'bot');
-    if (reply) {
-      const copy = document.createElement('button');
-      copy.type = 'button';
-      copy.className = 'copy';
-      copy.textContent = 'copy';
-      copy.onclick = () => {
-        const text = body.reply || '';
-        if (global.navigator && navigator.clipboard) navigator.clipboard.writeText(text).then(() => toast('reply copied', 'ok'));
-      };
-      reply.appendChild(copy);
-    }
-    state.history.push({ role: 'user', content: message }, { role: 'assistant', content: body.reply || '' });
-    setComposerState('ready');
-    loadSessions();   // its commands opened tabs — show them
-  }
-
-  async function saveProvider(form) {
-    const payload = {
-      id: $('p_id').value.trim(),
-      base_url: $('p_url').value.trim(),
-      model: $('p_model').value.trim(),
-      api_key: $('p_key').value,
-    };
-    const { status, body } = await json(`${AGENT}/providers`, { method: 'POST', body: JSON.stringify(payload) });
-    if (status !== 200) {
-      const text = body.error || `HTTP ${status}`;
-      say('AGENTBOX', text, 'err');
-      toast(text, 'err');
-      return;
-    }
-    $('p_key').value = '';
-    state.provider = body.provider.id;
-    loadProviders();
-    say('AGENTBOX', `provider ${body.provider.id} saved — using it for the next message`, 'bot');
-    toast(`provider ${body.provider.id} saved`, 'ok');
-  }
-
-  // ---- command palette -----------------------------------------------------
-
-  const palette = {
-    open: false,
-    index: 0,
-    items: [],
-  };
-
-  function paletteCommands() {
-    const cmds = [
-      { icon: '＋', label: 'New shell', hint: 'Alt+T', run: () => newSession() },
-      { icon: '⟳', label: 'Clear terminal view', hint: 'Alt+K', run: () => screen.clear() },
-      { icon: '⌨', label: 'Rename focused shell', hint: 'Alt+R', run: () => renameActive() },
-      { icon: '✕', label: 'Kill focused shell', hint: 'Alt+W', run: () => state.active ? closeSession(state.active) : toast('no focused shell', 'err') },
-      { icon: '◐', label: 'Toggle agent pane', hint: 'Alt+A', run: () => document.body.classList.toggle('agent-open') },
-      { icon: '⧉', label: 'Extensions drawer', hint: 'MCP · skills · plugins', run: () => { const p = $('extPanel'); p.hidden = !p.hidden; if (!p.hidden) loadExtensions(); } },
-      { icon: '⚿', label: 'Credentials drawer', hint: 'SSH · accounts', run: () => { const p = $('credPanel'); p.hidden = !p.hidden; if (!p.hidden) loadCredentials(); } },
-      { icon: '⚙', label: 'Manage providers', hint: 'agent endpoints', run: () => { const box = $('providerBox'); box.hidden = !box.hidden; if (!box.hidden) loadProviders(); } },
-      { icon: '⌁', label: 'Open live browser', hint: 'Alt+B', run: () => showView(browser.view === 'browser' ? 'shell' : 'browser') },
-      { icon: '◍', label: 'Launch browser engine', run: () => { showView('browser'); browserStart(); } },
-    ];
-    THEMES.forEach((t) => {
-      cmds.push({
-        icon: '◑', label: `Theme: ${t}`,
-        hint: t === state.theme ? 'current' : '',
-        run: () => { applyTheme(t); toast(`theme: ${t}`, 'ok'); },
-      });
-    });
-    state.providers.forEach((p) => {
-      cmds.push({
-        icon: '◈', label: `Provider: ${p.label || p.id}`,
-        hint: p.id === state.provider ? 'active' : (p.model || ''),
-        run: () => {
-          state.provider = p.id;
-          const pick = $('provider');
-          if (pick) pick.value = p.id;
-          renderProviders({ providers: state.providers, registry: ($('registry') || {}).textContent });
-          updateStatusbar();
-          toast(`provider → ${p.id}`, 'ok');
-        },
-      });
-    });
-    state.sessions.filter((s) => !s.closed).forEach((s) => {
-      cmds.push({
-        icon: '›_', label: `Focus shell: ${s.label || s.id}`,
-        hint: s.cwd || '',
-        run: () => select(s.id),
-      });
-    });
-    return cmds;
-  }
-
-  function paletteRender(filter) {
-    const list = $('paletteList');
-    if (!list) return;
-    palette.items = paletteCommands();
-    const q = (filter || '').trim().toLowerCase();
-    if (q) {
-      palette.items = palette.items.filter((c) =>
-        c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q));
-    }
-    list.textContent = '';
-    palette.items.slice(0, 24).forEach((c, i) => {
-      const li = document.createElement('li');
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'pal-item' + (i === palette.index ? ' active' : '');
-      btn.innerHTML = `<span class="pal-ic">${escapeHtml(c.icon)}</span>` +
-        `<span class="pal-label">${escapeHtml(c.label)}</span>` +
-        (c.hint ? `<span class="pal-hint">${escapeHtml(c.hint)}</span>` : '');
-      btn.onclick = () => { paletteClose(); c.run(); };
-      li.appendChild(btn);
-      list.appendChild(li);
-    });
-    palette.index = Math.min(palette.index, Math.max(0, palette.items.length - 1));
-  }
-
-  function paletteOpen() {
-    const wrap = $('palette');
-    if (!wrap) return;
-    wrap.hidden = false;
-    palette.open = true;
-    palette.index = 0;
-    const input = $('paletteInput');
-    if (input) { input.value = ''; input.focus(); }
-    paletteRender('');
-  }
-
-  function paletteClose() {
-    const wrap = $('palette');
-    if (!wrap) return;
-    wrap.hidden = true;
-    palette.open = false;
-  }
-
-  function paletteMove(delta) {
-    if (!palette.items.length) return;
-    palette.index = (palette.index + delta + palette.items.length) % palette.items.length;
-    const list = $('paletteList');
-    const active = list && list.children[palette.index];
-    if (active) {
-      list.querySelectorAll('.pal-item').forEach((n, i) => n.classList.toggle('active', i === palette.index));
-      active.scrollIntoView({ block: 'nearest' });
-    }
-  }
-
-  // ---- agent pane resizer --------------------------------------------------
-
-  function wireResizer() {
-    const grip = $('resizer');
-    if (!grip) return;
-    let startX = 0;
-    let startW = 0;
-    const MIN = 300;
-    const MAX = 720;
-    const begin = (e) => {
-      if (global.matchMedia && global.matchMedia('(max-width: 900px)').matches) return;
-      startX = e.clientX;
-      startW = document.querySelector('aside').getBoundingClientRect().width;
-      document.body.classList.add('resizing');
-      on(global, 'mousemove', move);
-      on(global, 'mouseup', end);
-      e.preventDefault();
-    };
-    const move = (e) => {
-      const w = Math.min(MAX, Math.max(MIN, startW - (e.clientX - startX)));
-      document.documentElement.style.setProperty('--agentw', w + 'px');
-      screen.fit();
-    };
-    const end = () => {
-      document.body.classList.remove('resizing');
-      global.removeEventListener('mousemove', move);
-      global.removeEventListener('mouseup', end);
-      const w = getComputedStyle(document.documentElement).getPropertyValue('--agentw').trim();
-      store.set('agent_linux_agentw', w);
-      postResize();
-    };
-    grip.addEventListener('mousedown', begin);
-    // Touch: same contract, one finger.
-    grip.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) return;
-      startX = e.touches[0].clientX;
-      startW = document.querySelector('aside').getBoundingClientRect().width;
-      document.body.classList.add('resizing');
-    }, { passive: true });
-    grip.addEventListener('touchmove', (e) => {
-      if (!document.body.classList.contains('resizing') || e.touches.length !== 1) return;
-      const w = Math.min(MAX, Math.max(MIN, startW - (e.touches[0].clientX - startX)));
-      document.documentElement.style.setProperty('--agentw', w + 'px');
-      screen.fit();
-    }, { passive: true });
-    grip.addEventListener('touchend', () => {
-      if (!document.body.classList.contains('resizing')) return;
-      document.body.classList.remove('resizing');
-      store.set('agent_linux_agentw', getComputedStyle(document.documentElement).getPropertyValue('--agentw').trim());
-      postResize();
-    });
-  }
-
-  function restorePaneWidth() {
-    const w = parseInt(store.get('agent_linux_agentw', ''), 10);
-    if (w >= 300 && w <= 720) {
-      document.documentElement.style.setProperty('--agentw', w + 'px');
-    }
-  }
-
-  // ---- live browser --------------------------------------------------------
-
-  const BROWSER = '/agent/browser';
-
-  const browser = {
-    stream: null,
-    running: false,
-    available: true,
-    url: '',
-    title: '',
-    viewport: { width: 1280, height: 800 },
-    frames: 0,
-    lastFrameAt: 0,
-    fps: 0,
-    view: 'shell',
-  };
-
-  function showView(name) {
-    browser.view = name === 'browser' ? 'browser' : 'shell';
-    const shellish = ['screen', 'tabs'];
-    shellish.forEach((id) => { const el = $(id); if (el) el.hidden = browser.view === 'browser'; });
-    const cwdPill = $('cwdPill');
-    if (cwdPill) cwdPill.hidden = browser.view === 'browser';
-    const sb = document.querySelector('.statusbar');
-    if (sb) sb.hidden = false;
-    const bv = $('browserView');
-    if (bv) bv.hidden = browser.view !== 'browser';
-    document.querySelectorAll('.segbtn').forEach((btn) => {
-      const active = btn.dataset.view === browser.view;
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-selected', String(active));
-    });
-    if (browser.view === 'browser') {
-      ensureBrowserStream();
-    } else {
-      screen.fit();                 // the xterm was hidden; re-fit on the way back
-      screen.focus();
-      postResize();
-    }
-  }
+  // ---- live browser ---------------------------------------------------------------------------
 
   function setBrowserStatus(text, cls) {
-    const el = $('bStatus');
-    if (el) { el.textContent = text; el.className = 'tagx' + (cls ? ' ' + cls : ''); }
-    const dot = $('bDot');
-    if (dot) dot.classList.toggle('bad', !browser.running);
+    const tag = $('bStatus');
+    if (tag) { tag.textContent = text; tag.className = 'tagx' + (cls ? ' ' + cls : ''); }
   }
-
   async function browserState() {
     const { status, body } = await json(BROWSER);
-    if (status !== 200) { toast(body.error || 'browser unavailable', 'err'); return null; }
+    if (status !== 200) return null;
     const info = body.browser || {};
-    browser.running = !!info.running;
-    browser.available = info.available !== false;
-    browser.viewport = info.viewport || browser.viewport;
-    browser.url = info.url || '';
-    browser.title = info.title || '';
+    state.browser.running = !!info.running;
+    state.browser.available = info.available !== false;
+    state.browser.viewport = info.viewport || state.browser.viewport;
+    state.browser.url = info.url || '';
+    state.browser.title = info.title || '';
     const urlBox = $('bUrl');
-    if (urlBox && document.activeElement !== urlBox) urlBox.value = browser.url || '';
-    const titleEl = $('bTitle');
-    if (titleEl) titleEl.textContent = browser.title || '';
-    setBrowserStatus(browser.running ? 'live' : (browser.available ? 'idle' : 'unavailable'),
-      browser.running ? 'acc' : '');
-    const frame = $('bFrame');
-    const empty = $('bEmpty');
-    if (frame) frame.hidden = !browser.running;
-    if (empty) empty.hidden = browser.running;
-    const hint = $('bHint');
-    if (hint && !browser.available) {
-      hint.textContent = 'Playwright is not installed on this host — see /health or the README.';
-    }
+    if (urlBox && document.activeElement !== urlBox) urlBox.value = state.browser.url || '';
+    if ($('bTitle')) $('bTitle').textContent = state.browser.title || '';
+    setBrowserStatus(state.browser.running ? 'live' : (state.browser.available ? 'idle' : 'unavailable'),
+      state.browser.running ? 'acc' : '');
+    const frame = $('bFrame'), empty = $('bEmpty');
+    if (frame) frame.hidden = !state.browser.running;
+    if (empty) empty.hidden = state.browser.running;
     return info;
   }
-
   async function browserStart() {
     setBrowserStatus('launching…');
     const { status, body } = await json(`${BROWSER}/start`, { method: 'POST' });
@@ -1024,53 +1102,45 @@ async function loadProviders() {
     await browserState();
     ensureBrowserStream();
   }
-
   async function browserStop() {
     await json(`${BROWSER}/stop`, { method: 'POST' });
-    if (browser.stream) { browser.stream.close(); browser.stream = null; }
+    if (state.browser.stream) { state.browser.stream.close(); state.browser.stream = null; }
     await browserState();
     setBrowserStatus('idle');
     toast('browser closed');
   }
-
   async function browserGo(url) {
     const target = (url || ($('bUrl') && $('bUrl').value) || '').trim();
     if (!target) return;
-    if (!browser.running) await browserStart();
+    if (!state.browser.running) await browserStart();
     setBrowserStatus('loading…');
     const { status, body } = await json(`${BROWSER}/navigate`, {
       method: 'POST', body: JSON.stringify({ url: target }),
     });
     if (status !== 200) { toast(body.error || 'navigation failed', 'err'); setBrowserStatus('error'); return; }
-    browser.url = body.browser.url || target;
-    if ($('bUrl')) $('bUrl').value = browser.url;
+    state.browser.url = body.browser.url || target;
+    if ($('bUrl')) $('bUrl').value = state.browser.url;
     ensureBrowserStream();
   }
-
   async function browserAction(payload) {
-    if (!browser.running) return;
+    if (!state.browser.running) return;
     const { status, body } = await json(`${BROWSER}/action`, {
       method: 'POST', body: JSON.stringify(payload),
     });
     if (status !== 200) { toast(body.error || 'action failed', 'err'); return; }
     const info = body.browser || {};
-    browser.url = info.url || browser.url;
-    const titleEl = $('bTitle');
-    if (titleEl && info.title) titleEl.textContent = info.title;
+    state.browser.url = info.url || state.browser.url;
+    if (info.title && $('bTitle')) $('bTitle').textContent = info.title;
   }
 
-  /**
-   * The frame stream. Frames arrive as base64 JPEG on an SSE `frame` event, so
-   * a page the user is not looking at costs nothing but the connection.
-   */
+  /** SSE frame stream — base64 JPEG on a `frame` event; idle pages cost nothing. */
   function ensureBrowserStream() {
-    if (browser.stream || browser.view !== 'browser') return;
+    if (state.browser.stream || state.view !== 'browser') return;
     const token = state.token ? `&token=${encodeURIComponent(state.token)}` : '';
-    // EventSource cannot send a header, so this one route takes the token in the
-    // query string. It is a read-only stream of a page the holder can already drive.
     const source = new EventSource(`${BROWSER}/stream?force=1${token}`);
-    browser.stream = source;
-    source.addEventListener('hello', () => setBrowserStatus(browser.running ? 'live' : 'idle', browser.running ? 'acc' : ''));
+    state.browser.stream = source;
+    source.addEventListener('hello', () => setBrowserStatus(state.browser.running ? 'live' : 'idle',
+      state.browser.running ? 'acc' : ''));
     source.addEventListener('frame', (e) => {
       let payload;
       try { payload = JSON.parse(e.data); } catch (err) { return; }
@@ -1080,51 +1150,41 @@ async function loadProviders() {
       frame.hidden = false;
       const empty = $('bEmpty');
       if (empty) empty.hidden = true;
-      browser.frames += 1;
+      state.browser.frames += 1;
       const now = Date.now();
-      if (browser.lastFrameAt && now - browser.lastFrameAt < 4000) {
-        browser.fps = Math.round(1000 / (now - browser.lastFrameAt) * 10) / 10;
+      if (state.browser.lastFrameAt && now - state.browser.lastFrameAt < 4000) {
+        state.browser.fps = Math.round(1000 / (now - state.browser.lastFrameAt) * 10) / 10;
       }
-      browser.lastFrameAt = now;
-      const fps = $('bFps');
-      if (fps) fps.textContent = `${browser.frames} frames`;
+      state.browser.lastFrameAt = now;
+      if ($('bFps')) $('bFps').textContent = `${state.browser.frames} frames`;
     });
     source.addEventListener('state', (e) => {
       let info;
       try { info = JSON.parse(e.data); } catch (err) { return; }
-      browser.running = !!info.running;
-      browser.url = info.url || browser.url;
-      browser.title = info.title || browser.title;
+      state.browser.running = !!info.running;
+      state.browser.url = info.url || state.browser.url;
+      state.browser.title = info.title || state.browser.title;
       const urlBox = $('bUrl');
       if (urlBox && document.activeElement !== urlBox && info.url) urlBox.value = info.url;
-      const titleEl = $('bTitle');
-      if (titleEl) titleEl.textContent = info.title || '';
+      if ($('bTitle')) $('bTitle').textContent = info.title || '';
       setBrowserStatus(info.running ? 'live' : 'idle', info.running ? 'acc' : '');
-      const frame = $('bFrame');
+      const frame = $('bFrame'), empty = $('bEmpty');
       if (frame) frame.hidden = !info.running;
-      const empty = $('bEmpty');
       if (empty) empty.hidden = !!info.running;
-    });
-    source.addEventListener('error', (e) => {
-      try {
-        const payload = JSON.parse(e.data || '{}');
-        if (payload.error) toast(payload.error, 'err');
-      } catch (err) { /* the connection itself dropped; handled below */ }
     });
     source.onerror = () => {
       source.close();
-      browser.stream = null;
-      if (browser.view === 'browser') setTimeout(ensureBrowserStream, 2500);
+      state.browser.stream = null;
+      if (state.view === 'browser') setTimeout(ensureBrowserStream, 2500);
     };
   }
 
-  /** A click on the frame, mapped from the displayed image to the viewport. */
+  /** Click on the frame, mapped from the displayed image to the viewport. */
   async function frameClick(event) {
     const frame = $('bFrame');
-    if (!frame || !browser.running) return;
+    if (!frame || !state.browser.running) return;
     const rect = frame.getBoundingClientRect();
-    const natural = { width: browser.viewport.width, height: browser.viewport.height };
-    // object-fit: contain letterboxes the image; undo that before scaling.
+    const natural = state.browser.viewport;
     const scale = Math.min(rect.width / natural.width, rect.height / natural.height);
     const drawnW = natural.width * scale;
     const drawnH = natural.height * scale;
@@ -1135,39 +1195,16 @@ async function loadProviders() {
     if (x < 0 || y < 0 || x > natural.width || y > natural.height) return;
     await browserAction({ action: 'click', x: Math.round(x), y: Math.round(y) });
   }
-
   function browserWheel(event) {
-    if (!browser.running) return;
+    if (!state.browser.running) return;
     event.preventDefault();
     browserAction({ action: 'scroll', direction: event.deltaY < 0 ? 'up' : 'down',
                     amount: Math.min(1200, Math.abs(Math.round(event.deltaY)) || 400) });
   }
 
-  const EXT = '/agent/extensions';
+// ---- extensions -----------------------------------------------------------------------------
 
-  const ext = {
-    loaded: false,
-    mcp: [],
-    skills: [],
-    plugins: [],
-    store: null,
-    catalogue: null,
-    codeAllowed: false,
-  };
-
-  function el(tag, cls, text) {
-    const node = document.createElement(tag);
-    if (cls) node.className = cls;
-    if (text != null) node.textContent = text;
-    return node;
-  }
-
-  function btn(label, fn, cls) {
-    const node = el('button', cls || '', label);
-    node.type = 'button';
-    node.onclick = fn;
-    return node;
-  }
+  const ext = { loaded: false, mcp: [], skills: [], plugins: [], store: null, catalogue: null };
 
   function itemCard(name, enabled, meta, tags, acts) {
     const card = el('div', 'item ' + (enabled ? 'on' : 'off'));
@@ -1184,6 +1221,33 @@ async function loadProviders() {
     }
     return card;
   }
+  function mkOption(value, label) {
+    const node = document.createElement('option');
+    node.value = value;
+    node.textContent = label;
+    return node;
+  }
+  async function copyText(text, okMessage) {
+    if (!text) { toast('nothing to copy', 'err'); return; }
+    try {
+      if (global.navigator && global.navigator.clipboard) {
+        await global.navigator.clipboard.writeText(text);
+        toast(okMessage || 'copied', 'ok');
+        return;
+      }
+    } catch (err) { /* clipboard blocked — fall through */ }
+    toast('clipboard blocked — the value is in the console log', 'err');
+    if (global.console) global.console.log(text);
+  }
+  function jsonField(value, label) {
+    const text = (value || '').trim();
+    if (!text) return {};
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch (err) { /* reported below */ }
+    throw new Error(`${label} must be a JSON object`);
+  }
 
   async function loadExtensions(force) {
     if (ext.loaded && !force) return;
@@ -1194,12 +1258,11 @@ async function loadProviders() {
       ext.loaded = true;
       const count = (body.mcp.enabled || 0) + (body.skills.enabled || 0) + (body.plugins.enabled || 0);
       const badge = $('extCount');
-      if (badge) badge.textContent = String(count);
+      if (badge) { badge.textContent = String(count); badge.hidden = count === 0; }
       const dot = $('extDot');
-      if (dot) dot.classList.toggle('bad', !body.mcp.enabled && !body.skills.enabled && !body.plugins.enabled);
-      const storeText = $('storeText');
-      if (storeText) {
-        storeText.textContent = 'store: ' + (body.store.backend || '?') +
+      if (dot) dot.classList.toggle('bad', count === 0);
+      if ($('storeText')) {
+        $('storeText').textContent = 'store: ' + (body.store.backend || '?') +
           (body.store.configured ? '' : ' (not configured)');
       }
       if (body.unavailable && body.unavailable.length) {
@@ -1213,7 +1276,7 @@ async function loadProviders() {
     loadDb();
   }
 
-  // ---- MCP ----------------------------------------------------------------
+  // ---- MCP ------------------------------------------------------------------------------------
 
   async function loadMcp() {
     const box = $('mcpList');
@@ -1233,7 +1296,6 @@ async function loadProviders() {
       if (server.source === 'env') tags.push(el('span', 'tagx', 'env'));
       if (server.tool_count) tags.push(el('span', 'tagx acc', `${server.tool_count} tools`));
       if (server.has_secrets) tags.push(el('span', 'tagx', 'secrets'));
-
       const acts = [
         btn('test', () => testMcp(server.id)),
         btn(server.enabled ? 'disable' : 'enable', () => toggleMcp(server.id, !server.enabled)),
@@ -1273,16 +1335,7 @@ async function loadProviders() {
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
     toast(`removed ${id}`, 'ok');
     await loadMcp();
-  }
-
-  function jsonField(value, label) {
-    const text = (value || '').trim();
-    if (!text) return {};
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
-    } catch (err) { /* reported below */ }
-    throw new Error(`${label} must be a JSON object`);
+    loadExtensions(true);
   }
 
   async function saveMcp(form) {
@@ -1307,7 +1360,7 @@ async function loadProviders() {
     loadExtensions(true);
   }
 
-  // ---- skills -------------------------------------------------------------
+  // ---- skills ---------------------------------------------------------------------------------
 
   async function loadSkills() {
     const box = $('skillList');
@@ -1343,7 +1396,6 @@ async function loadProviders() {
     if (!file) return;
     const form = new FormData();
     form.append('file', file, file.name);
-    // No content-type header: the browser must set the multipart boundary.
     const res = await fetch(`${EXT}/skills/upload`, { method: 'POST', headers: headers(), body: form });
     const body = await res.json().catch(() => ({}));
     if (res.status !== 200) { toast(body.error || `HTTP ${res.status}`, 'err'); return; }
@@ -1355,8 +1407,8 @@ async function loadProviders() {
   async function viewSkill(name) {
     const { status, body } = await json(`${EXT}/skills/${encodeURIComponent(name)}`);
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
-    say(`SKILL · ${name}`, body.skill.body || '(empty body)', 'tool');
-    document.body.classList.add('agent-open');
+    toast(name + ': ' + String(body.skill.body || '').slice(0, 120) + '…');
+    if (global.console) global.console.log(`[${name}]`, body.skill.body);
   }
 
   async function patchSkill(name, patch) {
@@ -1366,7 +1418,6 @@ async function loadProviders() {
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
     await loadSkills();
   }
-
   async function removeSkill(name) {
     const { status, body } = await json(`${EXT}/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
@@ -1374,7 +1425,6 @@ async function loadProviders() {
     await loadSkills();
     loadExtensions(true);
   }
-
   async function saveSkill(form) {
     const payload = {
       name: $('s_name').value.trim(),
@@ -1389,14 +1439,13 @@ async function loadProviders() {
     loadExtensions(true);
   }
 
-  // ---- plugins ------------------------------------------------------------
+  // ---- plugins ------------------------------------------------------------------------------------
 
   async function loadPlugins() {
     const box = $('pluginList');
     if (!box) return;
     const { body } = await json(`${EXT}/plugins`);
     ext.plugins = (body && body.plugins) || [];
-    ext.codeAllowed = !!(body && body.code_allowed);
     box.textContent = '';
     if (!ext.plugins.length) {
       box.append(el('div', 'meta', 'no plugins yet — add one below.'));
@@ -1436,9 +1485,8 @@ async function loadProviders() {
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
     const result = body.result || {};
     const text = result.output || result.error || JSON.stringify(result);
-    say(`PLUGIN · ${name}`, String(text).slice(0, 4000), result.error ? 'err' : 'tool');
-    toast(result.error ? `${name}: ${result.error}` : `${name}: HTTP ${result.status}`, result.error ? 'err' : 'ok');
-    document.body.classList.add('agent-open');
+    if (global.console) global.console.log(`[${name}]`, result);
+    toast(result.error ? `${name}: ${result.error}` : `${name}: ok`, result.error ? 'err' : 'ok');
   }
 
   async function patchPlugin(name, patch) {
@@ -1448,7 +1496,6 @@ async function loadProviders() {
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
     await loadPlugins();
   }
-
   async function removePlugin(name) {
     const { status, body } = await json(`${EXT}/plugins/${encodeURIComponent(name)}`, { method: 'DELETE' });
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
@@ -1456,7 +1503,6 @@ async function loadProviders() {
     await loadPlugins();
     loadExtensions(true);
   }
-
   async function savePlugin(form) {
     let props = {}, bodySpec = null;
     try {
@@ -1468,26 +1514,18 @@ async function loadProviders() {
       name: $('p_name').value.trim(),
       description: $('p_desc').value.trim(),
       kind: 'http',
-      parameters: {
-        type: 'object',
-        properties: props,
-        required: Object.keys(props),
-      },
-      request: {
-        method: $('p_method').value,
-        url: $('p_url').value.trim(),
-        body: bodySpec,
-      },
+      parameters: { type: 'object', properties: props, required: Object.keys(props) },
+      request: { method: $('p_method').value, url: $('p_url').value.trim(), body: bodySpec },
     };
     const { status, body } = await json(`${EXT}/plugins`, { method: 'POST', body: JSON.stringify(payload) });
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
     form.reset();
-    toast(`plugin ${body.plugin.name} added — press test to run it`, 'ok');
+    toast(`plugin ${body.plugin.name} added`, 'ok');
     await loadPlugins();
     loadExtensions(true);
   }
 
-  // ---- database -----------------------------------------------------------
+  // ---- database ---------------------------------------------------------------------------------------
 
   async function loadDb() {
     const box = $('dbCard');
@@ -1507,13 +1545,10 @@ async function loadProviders() {
     box.append(el('div', 'meta',
       s.backend === 'file'
         ? 'File backend: everything works, but a redeploy wipes it.'
-        : 'Database backend: skills, MCP servers and plugins survive a redeploy.'));
+        : 'Database backend: extensions survive a redeploy.'));
     const sql = el('pre', 'out', body.setup_sql || '');
     box.append(sql);
-    const copy = btn('copy setup sql', () => {
-      if (global.navigator && navigator.clipboard) navigator.clipboard.writeText(body.setup_sql || '').then(() => toast('sql copied', 'ok'));
-    });
-    box.append(copy);
+    box.append(btn('copy setup sql', () => copyText(body.setup_sql || '', 'sql copied')));
   }
 
   async function runDbQuery() {
@@ -1529,7 +1564,7 @@ async function loadProviders() {
     }
   }
 
-  // ---- catalogue ----------------------------------------------------------
+  // ---- catalogue -------------------------------------------------------------------------------------------
 
   async function loadCatalogue() {
     const box = $('catalogue');
@@ -1538,7 +1573,6 @@ async function loadProviders() {
     if (status !== 200) return;
     ext.catalogue = body;
     box.textContent = '';
-
     (body.mcp || []).forEach((server) => {
       const card = el('div', 'item');
       const top = el('div', 'top');
@@ -1562,7 +1596,6 @@ async function loadProviders() {
       card.append(acts);
       box.append(card);
     });
-
     const skill = body.skill_example;
     if (skill) {
       const card = el('div', 'item');
@@ -1578,7 +1611,6 @@ async function loadProviders() {
       card.append(acts);
       box.append(card);
     }
-
     const plugin = body.plugin_example;
     if (plugin) {
       const card = el('div', 'item');
@@ -1599,49 +1631,23 @@ async function loadProviders() {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Credentials — SSH keys, remote hosts and provider accounts.
-  //
-  // A second drawer, same furniture as extensions (`/agent/ssh*`,
-  // `/agent/accounts*`). The host never returns a private key, a password or a
-  // token unless a route is called to reveal it, so this client is written to
-  // match: masked values are shown as masked, and blank secret fields on an
-  // update mean "keep the stored one" — exactly what the API does.
-  // ---------------------------------------------------------------------------
-
-  const CRED = '/agent';
-
-  const cred = {
-    loaded: false,
-    keys: [],
-    hosts: [],
-    known: [],
-    accounts: [],
-    catalogue: [],
-    providers: {},
-    ssh: null,
-    vault: null,
-  };
-
-  function mkOption(value, label) {
-    const node = document.createElement('option');
-    node.value = value;
-    node.textContent = label;
-    return node;
+  function showPane(name) {
+    const panel = $('extPanel');
+    if (panel) panel.hidden = false;
+    const scope = panel || document;
+    scope.querySelectorAll('.exttab').forEach((tab) => {
+      const active = tab.dataset.pane === name;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+    });
+    scope.querySelectorAll('.extpane').forEach((pane) => {
+      pane.classList.toggle('active', pane.id === 'pane-' + name);
+    });
   }
 
-  async function copyText(text, okMessage) {
-    if (!text) { toast('nothing to copy', 'err'); return; }
-    try {
-      if (global.navigator && global.navigator.clipboard) {
-        await global.navigator.clipboard.writeText(text);
-        toast(okMessage || 'copied', 'ok');
-        return;
-      }
-    } catch (err) { /* clipboard blocked — fall through to the log */ }
-    toast('clipboard blocked — the value is in the console log', 'err');
-    if (global.console) global.console.log(text);
-  }
+  // ---- credentials -------------------------------------------------------------------------------------------
+
+  const cred = { loaded: false, keys: [], hosts: [], known: [], accounts: [], catalogue: [], providers: {}, ssh: null, vault: null };
 
   async function loadCredentials(force) {
     if (cred.loaded && !force) return;
@@ -1678,18 +1684,15 @@ async function loadProviders() {
 
   function renderCredBadge() {
     const badge = $('credCount');
-    if (badge) {
-      badge.textContent = String(cred.keys.length + cred.hosts.length + cred.accounts.length);
-    }
+    const count = cred.keys.length + cred.hosts.length + cred.accounts.length;
+    if (badge) { badge.textContent = String(count); badge.hidden = count === 0; }
     const dot = $('credDot');
     if (dot) dot.classList.toggle('bad', !cred.ssh || cred.ssh.available === false);
-    const vaultText = $('vaultText');
-    if (vaultText) {
+    if ($('vaultText')) {
       const v = cred.vault || {};
-      vaultText.textContent = 'vault: ' + (v.available ? (v.key_source || 'ready') : 'unavailable');
+      $('vaultText').textContent = 'vault: ' + (v.available ? (v.key_source || 'ready') : 'unavailable');
     }
   }
-
   function renderSshStatus() {
     const box = $('sshStat');
     if (!box) return;
@@ -1699,10 +1702,7 @@ async function loadProviders() {
       s.keygen ? 'ssh-keygen present' : 'ssh-keygen missing',
       `${s.keys || 0} keys · ${s.hosts || 0} hosts`,
     ].join(' · ');
-    box.className = s.available ? 'hint' : 'bad-line';
   }
-
-  // ---- SSH keys ------------------------------------------------------------
 
   function renderKeys() {
     const box = $('keyList');
@@ -1710,23 +1710,22 @@ async function loadProviders() {
     box.textContent = '';
     if (!cred.keys.length) {
       box.append(el('div', 'meta', 'no keys yet — generate one below, or import a private key you already have.'));
-    } else {
-      cred.keys.forEach((key) => {
-        const tags = [
-          el('span', 'tagx', key.type || 'key'),
-          el('span', 'tagx' + (key.has_private ? ' acc' : ''), key.has_private ? 'private in vault' : 'public only'),
-        ];
-        const acts = [
-          btn('copy public', () => copyText(key.public_key || '', 'public key copied')),
-          btn('reveal private', () => revealKey(key.name), 'primary'),
-          btn('delete', () => deleteKey(key.name)),
-        ];
-        const meta = `${key.fingerprint || 'no fingerprint'}${key.comment ? ' · ' + key.comment : ''}`;
-        box.append(itemCard(key.name, key.has_private, meta, tags, acts));
-      });
+      return;
     }
+    cred.keys.forEach((key) => {
+      const tags = [
+        el('span', 'tagx', key.type || 'key'),
+        el('span', 'tagx' + (key.has_private ? ' acc' : ''), key.has_private ? 'private in vault' : 'public only'),
+      ];
+      const acts = [
+        btn('copy public', () => copyText(key.public_key || '', 'public key copied')),
+        btn('reveal', () => revealKey(key.name), 'primary'),
+        btn('delete', () => deleteKey(key.name)),
+      ];
+      const meta = `${key.fingerprint || 'no fingerprint'}${key.comment ? ' · ' + key.comment : ''}`;
+      box.append(itemCard(key.name, key.has_private, meta, tags, acts));
+    });
   }
-
   async function saveKey(form) {
     const payload = {
       name: $('k_name').value.trim(),
@@ -1740,7 +1739,6 @@ async function loadProviders() {
     toast(`key "${payload.name}" generated`, 'ok');
     await loadCredentials(true);
   }
-
   async function importKey(form) {
     const payload = {
       name: $('k_import_name').value.trim(),
@@ -1757,15 +1755,13 @@ async function loadProviders() {
     toast(`key "${payload.name}" imported`, 'ok');
     await loadCredentials(true);
   }
-
   async function revealKey(name) {
     if (global.confirm && !global.confirm(
-      `Reveal the private key "${name}"?\n\nIt will be copied to the clipboard and logged by the host as a deliberate action.`)) return;
+      `Reveal the private key "${name}"?\n\nIt will be copied to the clipboard as a deliberate action.`)) return;
     const { status, body } = await json(`${CRED}/ssh/keys/${encodeURIComponent(name)}/private`);
     if (status !== 200 || !body.key) { toast((body && body.error) || 'cannot reveal the key', 'err'); return; }
     await copyText(body.key.private_key || '', 'private key copied to the clipboard');
   }
-
   async function deleteKey(name) {
     if (global.confirm && !global.confirm(
       `Delete the key "${name}"? Every host using it stops authenticating.`)) return;
@@ -1775,33 +1771,30 @@ async function loadProviders() {
     await loadCredentials(true);
   }
 
-  // ---- remote hosts --------------------------------------------------------
-
   function renderHosts() {
     const box = $('hostList');
     if (!box) return;
     box.textContent = '';
     if (!cred.hosts.length) {
       box.append(el('div', 'meta', 'no saved hosts yet — add one below and open it as a shell tab.'));
-    } else {
-      cred.hosts.forEach((host) => {
-        const tags = [
-          el('span', 'tagx', host.auth || 'key'),
-          el('span', 'tagx', ':' + host.port),
-        ];
-        if (host.key) tags.push(el('span', 'tagx acc', host.key));
-        if (host.has_password) tags.push(el('span', 'tagx acc', 'password set'));
-        const acts = [
-          btn('open shell', () => openHost(host.name), 'primary'),
-          btn('probe', () => probeHost(host.name)),
-          btn('fill form', () => fillHostForm(host)),
-          btn('delete', () => deleteHost(host.name)),
-        ];
-        const meta = `${host.target}${host.notes ? ' · ' + host.notes : ''}`;
-        box.append(itemCard(host.label || host.name, true, meta, tags, acts));
-      });
+      return;
     }
-    // Keep the "key to use" picker in step with the key list.
+    cred.hosts.forEach((host) => {
+      const tags = [
+        el('span', 'tagx', host.auth || 'key'),
+        el('span', 'tagx', ':' + host.port),
+      ];
+      if (host.key) tags.push(el('span', 'tagx acc', host.key));
+      if (host.has_password) tags.push(el('span', 'tagx acc', 'password set'));
+      const acts = [
+        btn('open shell', () => openHost(host.name), 'primary'),
+        btn('probe', () => probeHost(host.name)),
+        btn('fill form', () => fillHostForm(host)),
+        btn('delete', () => deleteHost(host.name)),
+      ];
+      const meta = `${host.target}${host.notes ? ' · ' + host.notes : ''}`;
+      box.append(itemCard(host.label || host.name, true, meta, tags, acts));
+    });
     const pick = $('h_key');
     if (pick) {
       const current = pick.value;
@@ -1811,7 +1804,6 @@ async function loadProviders() {
       pick.value = current;
     }
   }
-
   function fillHostForm(host) {
     $('h_name').value = host.name || '';
     $('h_label').value = host.label || '';
@@ -1822,11 +1814,10 @@ async function loadProviders() {
     $('h_key').value = host.key || '';
     $('h_profile').value = host.profile || '';
     $('h_notes').value = host.notes || '';
-    $('h_password').value = '';           // blank on an update keeps the stored one
+    $('h_password').value = '';
     showCredPane('sshhosts');
     toast(`form filled from "${host.name}"`, 'ok');
   }
-
   async function saveHostForm(form) {
     const payload = {
       name: $('h_name').value.trim(),
@@ -1852,18 +1843,17 @@ async function loadProviders() {
     toast(`host "${payload.name}" saved`, 'ok');
     await loadCredentials(true);
   }
-
   async function openHost(name) {
     const { status, body } = await json(
       `${CRED}/ssh/hosts/${encodeURIComponent(name)}/open`, { method: 'POST', body: '{}' });
     if (status !== 200) { toast((body && body.error) || 'cannot open the host', 'err'); return; }
     toast(`opening ${body.label || name}…`, 'ok');
     const panel = $('credPanel');
-    if (panel) panel.hidden = true;       // the ssh tab is a normal terminal session
+    if (panel) panel.hidden = true;
+    showView('terminal');
     await loadSessions();
     if (body.session) select(body.session);
   }
-
   async function probeHost(name) {
     toast(`probing ${name}…`);
     const { status, body } = await json(
@@ -1872,7 +1862,6 @@ async function loadProviders() {
     if (body.ok) toast(`${name}: ok in ${body.latency_ms}ms`, 'ok');
     else toast(`${name}: ${body.error || 'no answer'}`, 'err');
   }
-
   async function deleteHost(name) {
     if (global.confirm && !global.confirm(
       `Delete the host "${name}"? The saved credentials go with it.`)) return;
@@ -1881,8 +1870,6 @@ async function loadProviders() {
     toast(`host "${name}" deleted`, 'ok');
     await loadCredentials(true);
   }
-
-  // ---- known hosts ---------------------------------------------------------
 
   function renderKnownHosts() {
     const pathBox = $('khPath');
@@ -1903,7 +1890,6 @@ async function loadProviders() {
       box.append(itemCard(entry.hosts, true, `${entry.type} · ${entry.key}`, [], acts));
     });
   }
-
   async function forgetHost(hostname) {
     if (global.confirm && !global.confirm(
       `Forget the host key for "${hostname}"? The next connection trusts it again from scratch.`)) return;
@@ -1913,8 +1899,6 @@ async function loadProviders() {
     toast(`forgot ${hostname} (${body.forgotten || 0} removed)`, 'ok');
     await loadCredentials(true);
   }
-
-  // ---- accounts ------------------------------------------------------------
 
   function buildProviderSelect() {
     const pick = $('a_provider');
@@ -1929,7 +1913,6 @@ async function loadProviders() {
     if (current && cred.providers[current]) pick.value = current;
     renderAccountFields();
   }
-
   function renderAccountFields(preset) {
     const host = $('aFields');
     if (!host) return;
@@ -1946,19 +1929,14 @@ async function loadProviders() {
       input.placeholder = `${field.name}${required} — ${field.hint || ''}`;
       const stored = preset && preset[field.name] != null && preset[field.name] !== '';
       if (stored && field.secret) {
-        // A masked secret must never be sent back: the API reads a blank secret
-        // as "keep the stored one", so the field stays empty on purpose.
         input.placeholder = `${field.name} (set — blank keeps it)`;
       } else if (stored) {
         input.value = preset[field.name];
       }
       host.append(input);
     });
-    const note = el('span', 'hint', spec.note || '');
-    note.style.padding = '0';
-    host.append(note);
+    host.append(el('span', 'hint', spec.note || ''));
   }
-
   function renderAccounts() {
     const box = $('acctList');
     if (!box) return;
@@ -1975,7 +1953,6 @@ async function loadProviders() {
       });
       const acts = [
         btn(acct.active ? 'deactivate' : 'activate', () => activateAccount(acct), acct.active ? '' : 'primary'),
-        btn('env', () => showEnv(acct)),
         btn('fill form', () => fillAccountForm(acct)),
         btn('delete', () => deleteAccount(acct)),
       ];
@@ -1983,7 +1960,6 @@ async function loadProviders() {
       box.append(itemCard(acct.label || acct.name, true, meta, tags, acts));
     });
   }
-
   function fillAccountForm(acct) {
     $('a_provider').value = acct.provider;
     renderAccountFields(acct.fields || {});
@@ -1994,7 +1970,6 @@ async function loadProviders() {
     showCredPane('accounts');
     toast('secrets stay masked — leave a secret field blank to keep the stored value', 'ok');
   }
-
   async function saveAccount(form) {
     const provider = $('a_provider').value;
     const name = $('a_name').value.trim().toLowerCase();
@@ -2002,11 +1977,10 @@ async function loadProviders() {
     const fields = {};
     document.querySelectorAll('#aFields input[data-field]').forEach((input) => {
       const value = input.value.trim();
-      if (value) fields[input.dataset.field] = value;   // blank ⇒ keep stored
+      if (value) fields[input.dataset.field] = value;
     });
     const payload = {
-      provider,
-      name,
+      provider, name,
       label: $('a_label').value.trim(),
       notes: $('a_notes').value.trim(),
       active: $('a_active').checked,
@@ -2019,7 +1993,6 @@ async function loadProviders() {
     toast(`account ${provider}/${name} saved`, 'ok');
     await loadCredentials(true);
   }
-
   async function activateAccount(acct) {
     const next = !acct.active;
     const url = `${CRED}/accounts/${encodeURIComponent(acct.provider)}/${encodeURIComponent(acct.name)}/activate`;
@@ -2029,17 +2002,6 @@ async function loadProviders() {
     else toast(`${acct.provider}/${acct.name} ${next ? 'active' : 'inactive'}`, 'ok');
     await loadCredentials(true);
   }
-
-  async function showEnv(acct) {
-    const url = `${CRED}/accounts/${encodeURIComponent(acct.provider)}/${encodeURIComponent(acct.name)}/env`;
-    const { status, body } = await json(url);
-    if (status !== 200) { toast((body && body.error) || 'cannot read the environment', 'err'); return; }
-    const names = Object.keys(body.variables || {});
-    if (!names.length) { toast('this account exports nothing yet', 'err'); return; }
-    if (global.console) global.console.log(`[${acct.provider}/${acct.name}]`, body.variables);
-    toast(`${names.join(', ')} — values (masked) in the console log`, 'ok');
-  }
-
   async function deleteAccount(acct) {
     if (global.confirm && !global.confirm(
       `Delete ${acct.provider}/${acct.name}? The stored credentials go with it.`)) return;
@@ -2064,119 +2026,245 @@ async function loadProviders() {
     });
   }
 
-  function showPane(name) {
-    const panel = $('extPanel');
-    if (panel) panel.hidden = false;
-    // Scoped to this drawer: the credentials drawer reuses .exttab/.extpane for
-    // the same look, and an unscoped querySelectorAll would deactivate its tabs.
-    const scope = panel || document;
-    scope.querySelectorAll('.exttab').forEach((tab) => {
-      const active = tab.dataset.pane === name;
-      tab.classList.toggle('active', active);
-      tab.setAttribute('aria-selected', String(active));
+// ---- command palette ----------------------------------------------------------------------------------------------
+
+  const palette = { open: false, index: 0, items: [] };
+
+  function paletteCommands() {
+    const cmds = [
+      { icon: '💬', label: 'View: Chats', hint: 'Ctrl+1', run: () => showView('chats') },
+      { icon: '⌨', label: 'View: Terminal', hint: 'Ctrl+2', run: () => showView('terminal') },
+      { icon: '🌐', label: 'View: Live browser', hint: 'Ctrl+3', run: () => showView('browser') },
+      { icon: '🖼', label: 'View: Paintings', hint: 'Ctrl+4', run: () => showView('paintings') },
+      { icon: '⚙', label: 'View: Settings', hint: 'Ctrl+5', run: () => showView('settings') },
+      { icon: '＋', label: 'New chat', run: () => newTopic() },
+      { icon: '＋', label: 'New shell', hint: 'Alt+T', run: () => { showView('terminal'); newSession(); } },
+      { icon: '✎', label: 'Assistants', hint: 'personas', run: () => { const p = $('asstPanel'); p.hidden = false; renderAssistantEditor(); } },
+      { icon: '⧉', label: 'Extensions drawer', hint: 'MCP · skills · plugins', run: () => { const p = $('extPanel'); p.hidden = !p.hidden; if (!p.hidden) loadExtensions(); } },
+      { icon: '⚿', label: 'Credentials drawer', hint: 'SSH · accounts', run: () => { const p = $('credPanel'); p.hidden = !p.hidden; if (!p.hidden) loadCredentials(); } },
+      { icon: '⏻', label: 'Launch browser engine', run: () => { showView('browser'); browserStart(); } },
+    ];
+    THEMES.forEach((t) => {
+      cmds.push({
+        icon: '◑', label: `Theme: ${t}`,
+        hint: t === state.theme ? 'current' : '',
+        run: () => { applyTheme(t); toast(`theme: ${t}`, 'ok'); },
+      });
     });
-    scope.querySelectorAll('.extpane').forEach((pane) => {
-      pane.classList.toggle('active', pane.id === 'pane-' + name);
+    state.providers.forEach((p) => {
+      cmds.push({
+        icon: '◈', label: `Provider: ${p.label || p.id}`,
+        hint: p.id === state.provider ? 'active' : (p.model || ''),
+        run: () => {
+          state.provider = p.id;
+          const pick = $('providerPick');
+          if (pick) pick.value = p.id;
+          renderProviders();
+          loadModels();
+          toast(`provider → ${p.id}`, 'ok');
+        },
+      });
     });
+    state.assistants.forEach((a) => {
+      cmds.push({
+        icon: a.emoji || '🤖', label: `Assistant: ${a.name}`,
+        hint: a.id === state.activeAssistant ? 'active' : '',
+        run: () => {
+          state.activeAssistant = a.id;
+          store.set('agent_linux_assistant', a.id);
+          renderAssistantPick();
+          toast(`assistant → ${a.name}`, 'ok');
+        },
+      });
+    });
+    state.sessions.filter((s) => !s.closed).forEach((s) => {
+      cmds.push({
+        icon: '›_', label: `Focus shell: ${s.label || s.id}`,
+        hint: s.cwd || '',
+        run: () => { showView('terminal'); select(s.id); },
+      });
+    });
+    return cmds;
   }
 
-  function autosize(el) {
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 240) + 'px';
-  }
-
-  /** Composer meta row: busy state + char count. */
-  function setComposerState(mode) {
-    const tag = $('cmState');
-    const input = $('input');
-    const send = document.querySelector('#composer button[type="submit"]');
-    if (tag) {
-      tag.textContent = mode === 'working' ? 'thinking…' : 'ready';
-      tag.classList.toggle('acc', mode === 'working');
+  function paletteRender(filter) {
+    const list = $('paletteList');
+    if (!list) return;
+    palette.items = paletteCommands();
+    const q = (filter || '').trim().toLowerCase();
+    if (q) {
+      palette.items = palette.items.filter((c) =>
+        c.label.toLowerCase().includes(q) || (c.hint || '').toLowerCase().includes(q));
     }
-    if (send) send.disabled = mode === 'working';
-    if (mode === 'working' && input) input.placeholder = 'the agent is working — you can keep typing…';
-    else if (input) input.placeholder = 'describe the task — the agent plans, runs commands and reports back…';
+    list.textContent = '';
+    palette.items.slice(0, 24).forEach((c, i) => {
+      const li = el('li');
+      const node = el('button', 'pal-item' + (i === palette.index ? ' active' : ''));
+      node.type = 'button';
+      node.innerHTML = `<span class="pal-ic">${escapeHtml(c.icon)}</span>` +
+        `<span class="pal-label">${escapeHtml(c.label)}</span>` +
+        (c.hint ? `<span class="pal-hint">${escapeHtml(c.hint)}</span>` : '');
+      node.onclick = () => { paletteClose(); c.run(); };
+      li.append(node);
+      list.append(li);
+    });
+    palette.index = Math.min(palette.index, Math.max(0, palette.items.length - 1));
+  }
+  function paletteOpen() {
+    const wrap = $('palette');
+    if (!wrap) return;
+    wrap.hidden = false;
+    palette.open = true;
+    palette.index = 0;
+    const input = $('paletteInput');
+    if (input) { input.value = ''; input.focus(); }
+    paletteRender('');
+  }
+  function paletteClose() {
+    const wrap = $('palette');
+    if (!wrap) return;
+    wrap.hidden = true;
+    palette.open = false;
+  }
+  function paletteMove(delta) {
+    if (!palette.items.length) return;
+    palette.index = (palette.index + delta + palette.items.length) % palette.items.length;
+    const list = $('paletteList');
+    const active = list && list.children[palette.index];
+    if (active) {
+      list.querySelectorAll('.pal-item').forEach((n, i) => n.classList.toggle('active', i === palette.index));
+      if (active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
+    }
   }
 
-  function wireComposerMeta() {
-    const input = $('input');
-    if (!input) return;
-    const chars = $('cmChars');
-    on(input, 'input', () => { if (chars) chars.textContent = String(input.value.length); });
+  // ---- settings wiring -----------------------------------------------------------------------------------------------
+
+  function wireSettings() {
+    on($('wipeChats'), 'click', () => {
+      if (global.confirm && !global.confirm('Delete every chat on this device?')) return;
+      state.topics = [];
+      store.del('agent_linux_topics');
+      store.del('agent_linux_topic');
+      newTopic(true);
+      renderList();
+      renderChat();
+      toast('all chats cleared');
+    });
+    on($('wipeAll'), 'click', () => {
+      if (global.confirm && !global.confirm('Reset everything — chats, assistants, paintings and settings?')) return;
+      ['agent_linux_topics', 'agent_linux_topic', 'agent_linux_assistants', 'agent_linux_assistant',
+        'agent_linux_paintings', 'agent_linux_theme', 'agent_linux_view', 'agent_linux_history'].forEach(store.del);
+      state.assistants = [].concat(DEFAULT_ASSISTANTS);
+      state.activeAssistant = 'agentbox';
+      state.paintings = [];
+      loadChats();
+      renderAssistantPick();
+      renderAssistantEditor();
+      renderPaintings();
+      renderList();
+      toast('reset done');
+    });
+    const hist = $('setHistory');
+    if (hist) {
+      hist.value = String(store.get('agent_linux_history', '12'));
+      on(hist, 'change', () => {
+        const n = Math.max(0, Math.min(50, parseInt(hist.value, 10) || 12));
+        state.historyTurns = n;
+        store.set('agent_linux_history', String(n));
+        toast(`history: ${n} turns`, 'ok');
+      });
+    }
   }
+
+  // ---- wiring -----------------------------------------------------------------------------------------------------------
 
   function wire() {
-    wireComposerMeta();
+    // rail views
+    document.querySelectorAll('.rbtn[data-view]').forEach((node) => {
+      on(node, 'click', () => {
+        showView(node.dataset.view);
+        if (global.innerWidth <= 900 && node.dataset.view === 'chats') document.body.classList.add('list-open');
+      });
+    });
+    // list
+    on($('listAction'), 'click', () => {
+      if (state.view === 'chats') newTopic();
+      else if (state.view === 'terminal') { showView('terminal'); newSession(); }
+      else if (state.view === 'paintings') { const input = $('paintPrompt'); if (input) input.focus(); }
+    });
+    on($('listSearch'), 'input', () => renderList());
+    // composer
+    on($('composer'), 'submit', (e) => {
+      e.preventDefault();
+      const box = $('input');
+      const message = (box.value || '').trim();
+      if (!message) return;
+      box.value = '';
+      autosize(box);
+      if ($('cmChars')) $('cmChars').textContent = '0';
+      ask(message);
+    });
+    on($('input'), 'input', (e) => {
+      autosize(e.target);
+      if ($('cmChars')) $('cmChars').textContent = String(e.target.value.length);
+    });
+    on($('input'), 'keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        $('composer').requestSubmit();
+      }
+    });
+    on($('attachBtn'), 'click', () => { const f = $('attachFile'); if (f) f.click(); });
+    on($('attachFile'), 'change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      uploadAttachment(file);
+      e.target.value = '';
+    });
+    on($('assistantPick'), 'change', (e) => {
+      state.activeAssistant = e.target.value;
+      store.set('agent_linux_assistant', state.activeAssistant);
+      const t = state.topics.find((x) => x.id === state.activeTopic);
+      if (t) { t.assistant = state.activeAssistant; saveChats(); }
+      renderList();
+    });
+    on($('editAssistant'), 'click', () => {
+      const p = $('asstPanel');
+      p.hidden = false;
+      renderAssistantEditor();
+    });
+    on($('modelPick'), 'change', (e) => {
+      state.model = e.target.value;
+      state.modelByProvider[state.provider] = state.model;
+    });
+    on($('providerPick'), 'change', (e) => {
+      state.provider = e.target.value;
+      state.model = state.modelByProvider[state.provider] || 'auto';
+      renderProviders();
+      loadModels();
+      toast(`provider → ${state.provider}`, 'ok');
+    });
+    // terminal
     on($('new'), 'click', newSession);
     on($('rename'), 'click', renameActive);
     on($('kill'), 'click', () => {
       if (state.active) closeSession(state.active);
       else toast('no focused shell', 'err');
     });
-    on($('manage'), 'click', () => {
-      const box = $('providerBox');
-      box.hidden = !box.hidden;
-      if (!box.hidden) loadProviders();
-    });
-    on($('provider'), 'change', (e) => {
-      state.provider = e.target.value;
-      renderProviders({ providers: state.providers, registry: ($('registry') || {}).textContent });
-      updateStatusbar();
-    });
+    // theme
     on($('theme'), 'change', (e) => applyTheme(e.target.value));
-    on($('provForm'), 'submit', (e) => { e.preventDefault(); saveProvider(); });
-    on($('composer'), 'submit', (e) => {
-      e.preventDefault();
-      const box = $('input');
-      const message = box.value.trim();
-      if (!message) return;
-      box.value = '';
-      autosize(box);
-      ask(message);
-    });
-    on($('input'), 'input', (e) => autosize(e.target));
-    on($('input'), 'keydown', (e) => {
-      // Enter sends; Shift+Enter (and Ctrl/⌘+Enter) keep working.
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        $('composer').requestSubmit();
-      }
-    });
-    on($('clear'), 'click', () => screen.clear());
-    on($('paneToggle'), 'click', () => document.body.classList.toggle('agent-open'));
-    on($('closePane'), 'click', () => document.body.classList.remove('agent-open'));
-    on(global, 'resize', () => { screen.fit(); postResize(); });
-
-    // ---- command palette ---------------------------------------------------
-    on($('paletteBtn'), 'click', paletteOpen);
-    on($('paletteBackdrop'), 'click', paletteClose);
-    on($('paletteInput'), 'input', (e) => { palette.index = 0; paletteRender(e.target.value); });
-    on($('paletteInput'), 'keydown', (e) => {
-      if (e.key === 'ArrowDown') { e.preventDefault(); paletteMove(1); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); paletteMove(-1); }
-      else if (e.key === 'Enter') {
-        e.preventDefault();
-        const item = palette.items[palette.index];
-        if (item) { paletteClose(); item.run(); }
-      }
-    });
-
-    // ---- agent pane resizer ------------------------------------------------
-    wireResizer();
-
-    // ---- live browser controls --------------------------------------------
-    document.querySelectorAll('.segbtn').forEach((btn) => {
-      on(btn, 'click', () => showView(btn.dataset.view));
-    });
+    // providers
+    on($('provForm'), 'submit', (e) => { e.preventDefault(); saveProviderForm(); });
+    // paintings
+    on($('paintGo'), 'click', generatePainting);
+    on($('paintPrompt'), 'keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); generatePainting(); } });
+    // browser
     on($('bGo'), 'click', () => browserGo());
     on($('bUrl'), 'keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); browserGo(); } });
     on($('bStart'), 'click', browserStart);
     on($('bLaunch'), 'click', browserStart);
     on($('bStop'), 'click', browserStop);
     on($('bBack'), 'click', () => browserAction({ action: 'back' }));
-    on($('bReload'), 'click', () => browserGo(browser.url || ($('bUrl') && $('bUrl').value)));
+    on($('bReload'), 'click', () => browserGo(state.browser.url || ($('bUrl') && $('bUrl').value)));
     on($('bUp'), 'click', () => browserAction({ action: 'scroll', direction: 'up', amount: 700 }));
     on($('bDown'), 'click', () => browserAction({ action: 'scroll', direction: 'down', amount: 700 }));
     on($('bFrame'), 'click', frameClick);
@@ -2190,23 +2278,46 @@ async function loadProviders() {
       box.value = '';
       browserAction({ action: 'type', text, submit: true });
     });
-
-    // ---- extensions drawer ------------------------------------------------
-    on($('ext'), 'click', () => {
-      const panel = $('extPanel');
-      panel.hidden = !panel.hidden;
-      if (!panel.hidden) loadExtensions();
+    // drawers
+    on($('extBtn'), 'click', () => {
+      const p = $('extPanel');
+      p.hidden = !p.hidden;
+      if (!p.hidden) loadExtensions();
     });
     on($('extClose'), 'click', () => { const p = $('extPanel'); if (p) p.hidden = true; });
     document.querySelectorAll('#extPanel .exttab').forEach((tab) => {
       on(tab, 'click', () => showPane(tab.dataset.pane));
     });
+    on($('credBtn'), 'click', () => {
+      const p = $('credPanel');
+      p.hidden = !p.hidden;
+      if (!p.hidden) loadCredentials();
+    });
+    on($('credClose'), 'click', () => { const p = $('credPanel'); if (p) p.hidden = true; });
+    document.querySelectorAll('#credPanel .exttab').forEach((tab) => {
+      on(tab, 'click', () => showCredPane(tab.dataset.pane));
+    });
+    // assistants drawer
+    on($('asstClose'), 'click', () => { const p = $('asstPanel'); if (p) p.hidden = true; });
+    on($('asstForm'), 'submit', (e) => { e.preventDefault(); saveAssistantForm(e.target); });
+    on($('asstDelete'), 'click', () => {
+      const id = $('asstForm').dataset.editing || '';
+      const rec = state.assistants.find((a) => a.id === id);
+      if (!rec) { toast('select "edit" on an assistant first', 'err'); return; }
+      if (rec.id === 'agentbox') { toast('the default assistant stays', 'err'); return; }
+      state.assistants = state.assistants.filter((a) => a.id !== id);
+      store.setJSON('agent_linux_assistants', state.assistants);
+      $('asstForm').dataset.editing = '';
+      renderAssistantEditor();
+      renderAssistantPick();
+      toast(`assistant ${rec.name} deleted`);
+    });
+    // extensions forms
     on($('mcpForm'), 'submit', (e) => { e.preventDefault(); saveMcp(e.target); });
     on($('skillForm'), 'submit', (e) => { e.preventDefault(); saveSkill(e.target); });
     on($('pluginForm'), 'submit', (e) => { e.preventDefault(); savePlugin(e.target); });
     on($('dbRun'), 'click', runDbQuery);
-
-    // The drop zone is a real file input: click, drop and keyboard all work.
+    // skill drop zone
     const drop = $('skillDrop');
     const fileInput = $('skillFile');
     if (drop && fileInput) {
@@ -2223,104 +2334,102 @@ async function loadProviders() {
         uploadSkillFile(file);
       });
     }
-
-    // ---- credentials drawer -----------------------------------------------
-    const credPanel = $('credPanel');
-    on($('cred'), 'click', () => {
-      if (!credPanel) return;
-      credPanel.hidden = !credPanel.hidden;
-      if (!credPanel.hidden) loadCredentials();
-    });
-    on($('credClose'), 'click', () => { if (credPanel) credPanel.hidden = true; });
-    // Scoped on purpose — an unscoped `.exttab` selector would also hit the
-    // extensions drawer's tabs and switch both drawers at once.
-    if (credPanel) {
-      credPanel.querySelectorAll('.exttab').forEach((tab) => {
-        on(tab, 'click', () => showCredPane(tab.dataset.pane));
-      });
-    }
+    // credentials forms
     on($('keyForm'), 'submit', (e) => { e.preventDefault(); saveKey(e.target); });
     on($('keyImportForm'), 'submit', (e) => { e.preventDefault(); importKey(e.target); });
     on($('hostForm'), 'submit', (e) => { e.preventDefault(); saveHostForm(e.target); });
     on($('acctForm'), 'submit', (e) => { e.preventDefault(); saveAccount(e.target); });
     on($('a_provider'), 'change', () => renderAccountFields());
-
-    // Shortcuts — Alt+… never collides with a shell running in the xterm.
+    // lightbox
+    on($('lightbox'), 'click', closeLightbox);
+    // palette
+    on($('paletteBtn'), 'click', paletteOpen);
+    on($('paletteBackdrop'), 'click', paletteClose);
+    on($('paletteInput'), 'input', (e) => { palette.index = 0; paletteRender(e.target.value); });
+    on($('paletteInput'), 'keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); paletteMove(1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); paletteMove(-1); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        const item = palette.items[palette.index];
+        if (item) { paletteClose(); item.run(); }
+      }
+    });
+    // keyboard
     on(global, 'keydown', (e) => {
-      if (palette.open) {
-        if (e.key === 'Escape') { paletteClose(); return; }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && ['1', '2', '3', '4', '5'].indexOf(e.key) >= 0) {
+        const views = { 1: 'chats', 2: 'terminal', 3: 'browser', 4: 'paintings', 5: 'settings' };
+        e.preventDefault();
+        showView(views[e.key]);
+        return;
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && !e.altKey) {
         e.preventDefault();
         palette.open ? paletteClose() : paletteOpen();
         return;
       }
+      if (e.key === 'Escape') {
+        if (palette.open) { paletteClose(); return; }
+        const lb = $('lightbox');
+        if (lb && !lb.hidden) { closeLightbox(); return; }
+        ['extPanel', 'credPanel', 'asstPanel'].forEach((id) => { const p = $(id); if (p) p.hidden = true; });
+        return;
+      }
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const key = e.key.toLowerCase();
-      if (key === 'k') { e.preventDefault(); screen.clear(); }
+      if (key === 't') { e.preventDefault(); showView('terminal'); newSession(); }
+      else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('list-open'); }
+      else if (key === 'p') { e.preventDefault(); palette.open ? paletteClose() : paletteOpen(); }
+      else if (key === 'b') { e.preventDefault(); showView('browser'); }
       else if (key === 'r') { e.preventDefault(); renameActive(); }
       else if (key === 'w') { e.preventDefault(); if (state.active) closeSession(state.active); }
-      else if (key === 't') { e.preventDefault(); newSession(); }
-      else if (key === 'b') { e.preventDefault(); showView(browser.view === 'browser' ? 'shell' : 'browser'); }
-      else if (key === 'a') { e.preventDefault(); document.body.classList.toggle('agent-open'); }
-      else if (key === 'p') { e.preventDefault(); palette.open ? paletteClose() : paletteOpen(); }
-      else if (key === 'c') {
-        e.preventDefault();
-        if (!credPanel) return;
-        credPanel.hidden = !credPanel.hidden;
-        if (!credPanel.hidden) loadCredentials();
-      }
-      else if (key === '1' || key === '2' || key === '3' || key === '4' || key === '5' || key === '6' || key === '7' || key === '8') {
-        const idx = Number(key) - 1;
-        const live = state.sessions.filter((s) => !s.closed);
-        if (live[idx]) { e.preventDefault(); select(live[idx].id); }
-      }
     });
-    on(global, 'keydown', (e) => {
-      if (e.key === 'Escape' && palette.open) paletteClose();
-    });
+    on(global, 'resize', () => { screen.fit(); postResize(); });
+    wireSettings();
   }
+
+  // ---- boot -------------------------------------------------------------------------------------------------------------
 
   async function boot() {
     rememberToken();
-    applyTheme(store.get('agent_linux_theme', 'obsidian'));
-    restorePaneWidth();
+    // assistants
+    state.assistants = store.getJSON('agent_linux_assistants', null) || [].concat(DEFAULT_ASSISTANTS);
+    state.activeAssistant = store.get('agent_linux_assistant', 'agentbox');
+    if (!state.assistants.find((a) => a.id === state.activeAssistant)) state.activeAssistant = 'agentbox';
+    loadChats();
+    loadPaintings();
+    state.historyTurns = Math.max(0, Math.min(50, parseInt(store.get('agent_linux_history', '12'), 10) || 12));
+    applyTheme(store.get('agent_linux_theme', 'cherry'));
     wire();
     buildTerminal();
     setLink(null, 'linking');
+    renderAssistantPick();
+    renderAssistantEditor();
+    showView(store.get('agent_linux_view', 'chats'));
     try {
       await loadSessions();
       if (!state.sessions.some((s) => !s.closed)) await newSession();
     } catch (err) {
       setLink(false, 'offline');
-      say('TERMINAL', `cannot reach the terminal host (${err && err.message})`, 'err');
     }
-    renderEmptyState();
     loadProviders();
     ping();
     global.setInterval(loadSessions, 20000);
     global.setInterval(ping, 45000);
-    // Boot splash out — never trap the user behind it.
-    const splash = $('boot');
-    if (splash) {
-      splash.classList.add('out');
-      setTimeout(() => splash.remove(), 600);
-    }
-    updateStatusbar();
+    renderChat();
+    renderPaintings();
   }
 
+  // ---- exports (debug/testing) ------------------------------------------------------------------------------------------
+
   const AgentLinuxConsole = {
-    state, screen, api, json, askToken, headers, toast, applyTheme, ping,
-    loadSessions, renderTabs, select, attach, onChunk,
-    newSession, closeSession, renameSession, renameActive, send, postResize, buildTerminal,
-    loadProviders, renderProviders, saveProvider, ask, boot, say, sayThinking, sayReasoning, renderLite,
+    state, screen, api, json, toast, applyTheme, showView, renderList,
+    loadSessions, newSession, closeSession, select,
+    ask, regenerate, newTopic, deleteTopic, selectTopic, currentTopic,
+    loadProviders, renderProviders, loadModels, saveProviderForm,
+    generatePainting, renderPaintings, openLightbox, closeLightbox,
     paletteOpen, paletteClose, paletteRender, paletteCommands,
-    setComposerState, wireComposerMeta,
-    ext, loadExtensions, loadMcp, loadSkills, loadPlugins, loadDb, loadCatalogue,
-    showPane, uploadSkillFile, runDbQuery,
-    cred, loadCredentials, showCredPane,
-    browser, showView, browserState, browserStart, browserStop, browserGo, browserAction,
-    ensureBrowserStream,
+    loadExtensions, loadCredentials, boot, ping, uploadAttachment,
   };
 
   global.AgentLinuxConsole = AgentLinuxConsole;

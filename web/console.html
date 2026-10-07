@@ -1,17 +1,13 @@
 <!doctype html>
-<html lang="en" data-theme="obsidian">
+<html lang="en" data-theme="cherry">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#05060c">
-<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d0d12">
+<meta name="color-scheme" content="dark light">
 <meta name="description" content="Agent_Linux — a root cloud shell with an AI agent beside it.">
 <title>Agent_Linux</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0b14'/%3E%3Cpath d='M9 11l5 5-5 5' stroke='%237c5cff' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h6' stroke='%2322d3ee' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
-<!-- xterm.js — the same versions the dashboard pins, so a standalone terminal
-     gets real emulation (colour, cursor, vim, top). If this CDN is blocked the
-     console falls back to a plain append-only viewer instead of rendering
-     nothing; see console.js. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23eb5757'/%3E%3Cpath d='M11 21l10-10M21 11h-7m7 0v7' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -19,979 +15,718 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <style>
-/* ==========================================================================
-   NOVAROUTER — agent operations console · skin v2
-
-   One stylesheet, five themes, no build step. Everything reads from the token
-   block, so a theme is six overrides and nothing else changes. The look is a
-   serious operator playground: deep space background, aurora wash, grid mask,
-   glass panels, gradient accents — while the terminal itself stays a terminal:
-   monospace, no glow on text, no motion in the output.
-   ========================================================================== */
+/* Agent_Linux console · Cherry Studio-style skin.
+   Layout: icon rail · list column · content view. Chat-first; the terminal,
+   live browser and paintings one keystroke away. Zero dependencies. */
 :root {
-  --acc1: #7c5cff;                 /* violet — primary accent */
-  --acc2: #22d3ee;                 /* cyan   — secondary accent */
-  --acc3: #34d399;                 /* mint   — success / live */
-  --warn: #fbbf24;
-  --err:  #fb7185;
-
-  --bg:      #05060c;
-  --bg-2:    #080a14;
-  --bg-3:    #0b0e1a;
-  --panel:   rgba(255,255,255,.030);
-  --panel-2: rgba(255,255,255,.055);
-  --line:    rgba(255,255,255,.075);
-  --line-2:  rgba(255,255,255,.16);
-  --fg:      #e9edf8;
-  --dim:     #8d95ab;
-  --dim-2:   #5d6579;
-
-  --grad: linear-gradient(120deg, var(--acc1), var(--acc2));
-  --glow: 0 0 0 1px color-mix(in srgb, var(--acc1) 45%, transparent),
-          0 10px 32px -14px color-mix(in srgb, var(--acc1) 75%, transparent);
-  --raise: 0 1px 0 rgba(255,255,255,.05) inset, 0 12px 34px -18px rgba(0,0,0,.85);
-  --radius: 14px;
-  --radius-sm: 10px;
-  --topbar-h: 50px;
-  --agentw: 430px;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --disp: "Space Grotesk", Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --term-bg: #05060c;
-  --term-fg: #cbd5e1;
+  --acc: #eb5757; --acc-soft: rgba(235,87,87,.14); --acc-line: rgba(235,87,87,.38);
+  --acc2: #e05e6f; --ok: #34c77b; --warn: #f2a33c; --err: #ef5e6e;
+  --radius: 12px; --radius-sm: 9px; --rail-w: 62px; --list-w: 268px;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --disp: "Space Grotesk", Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif;
 }
-html[data-theme="plasma"]  { --acc1:#ff3ea5; --acc2:#8b5cf6; --acc3:#f472b6; --bg:#0a0510; --bg-2:#120820; --bg-3:#180b2a; --term-bg:#0a0510; }
-html[data-theme="matrix"]  { --acc1:#3ee07f; --acc2:#a3e635; --acc3:#22d3ee; --bg:#040a07; --bg-2:#06130c; --bg-3:#081a10; --term-bg:#040a07; }
-html[data-theme="glacier"] { --acc1:#38bdf8; --acc2:#818cf8; --acc3:#22d3ee; --bg:#040810; --bg-2:#071223; --bg-3:#0a1830; --term-bg:#040810; }
-html[data-theme="ember"]   { --acc1:#fb923c; --acc2:#f43f5e; --acc3:#fbbf24; --bg:#0c0705; --bg-2:#160c08; --bg-3:#1d0f0a; --term-bg:#0c0705; }
+html[data-theme="cherry"] {
+  --bg: #0d0d12; --bg-2: #101017; --bg-3: #14141c;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.06);
+  --line: rgba(255,255,255,.08); --line-2: rgba(255,255,255,.16);
+  --fg: #eceef4; --dim: #9aa0b2; --dim-2: #626879;
+  --term-bg: #0d0d12; --term-fg: #cdd2e0;
+}
+html[data-theme="cherry-light"] {
+  --bg: #f4f4f8; --bg-2: #ffffff; --bg-3: #ffffff;
+  --panel: rgba(20,20,40,.03); --panel-2: rgba(20,20,40,.06);
+  --line: rgba(20,20,50,.10); --line-2: rgba(20,20,50,.18);
+  --fg: #1c1e26; --dim: #5b6072; --dim-2: #8d93a5;
+  --acc-soft: rgba(235,87,87,.10); --acc-line: rgba(235,87,87,.32);
+  --term-bg: #ffffff; --term-fg: #2a2c36;
+}
+html[data-theme="obsidian"] {
+  --acc: #7c5cff; --acc2: #22d3ee;
+  --acc-soft: rgba(124,92,255,.14); --acc-line: rgba(124,92,255,.38);
+  --bg: #05060c; --bg-2: #080a14; --bg-3: #0b0e1a;
+  --panel: rgba(255,255,255,.03); --panel-2: rgba(255,255,255,.055);
+  --line: rgba(255,255,255,.075); --line-2: rgba(255,255,255,.16);
+  --fg: #e9edf8; --dim: #8d95ab; --dim-2: #5d6579;
+  --term-bg: #05060c; --term-fg: #cbd5e1;
+}
+html[data-theme="plasma"] { --acc:#ff3ea5; --acc2:#8b5cf6; --acc-soft:rgba(255,62,165,.14); --acc-line:rgba(255,62,165,.38);
+  --bg:#0a0510; --bg-2:#120820; --bg-3:#180b2a; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
+  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#0a0510; --term-fg:#e6d9f5; }
+html[data-theme="matrix"] { --acc:#3ee07f; --acc2:#a3e635; --acc-soft:rgba(62,224,127,.14); --acc-line:rgba(62,224,127,.38);
+  --bg:#040a07; --bg-2:#06130c; --bg-3:#081a10; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
+  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#040a07; --term-fg:#c8f7d6; }
+html[data-theme="glacier"] { --acc:#38bdf8; --acc2:#818cf8; --acc-soft:rgba(56,189,248,.14); --acc-line:rgba(56,189,248,.38);
+  --bg:#040810; --bg-2:#071223; --bg-3:#0a1830; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
+  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#040810; --term-fg:#cfe3ff; }
+html[data-theme="ember"] { --acc:#fb923c; --acc2:#f43f5e; --acc-soft:rgba(251,146,60,.14); --acc-line:rgba(251,146,60,.38);
+  --bg:#0c0705; --bg-2:#160c08; --bg-3:#1d0f0a; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
+  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#0c0705; --term-fg:#f6ddd0; }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
-body {
-  margin: 0; background: var(--bg); color: var(--fg); overflow: hidden;
-  font: 14px/1.55 var(--disp);
-  -webkit-font-smoothing: antialiased;
-  transition: background .3s ease;
-}
-::selection { background: color-mix(in srgb, var(--acc1) 38%, transparent); }
+body { margin: 0; background: var(--bg); color: var(--fg); overflow: hidden;
+  font: 14px/1.55 var(--disp); -webkit-font-smoothing: antialiased; }
+::selection { background: color-mix(in srgb, var(--acc) 35%, transparent); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
+::-webkit-scrollbar-track { background: transparent; }
 
-/* ambient layers — decoration only, never intercept a click */
-body::before {
-  content: ""; position: fixed; inset: -30% -12% auto -12%; height: 75vh; z-index: 0;
-  background:
-    radial-gradient(42% 58% at 14% 0%, color-mix(in srgb, var(--acc1) 24%, transparent), transparent 70%),
-    radial-gradient(38% 52% at 84% 4%, color-mix(in srgb, var(--acc2) 18%, transparent), transparent 70%),
-    radial-gradient(24% 34% at 55% 18%, color-mix(in srgb, var(--acc3) 9%, transparent), transparent 70%);
-  filter: blur(34px); opacity: .55; pointer-events: none;
-  animation: drift 26s ease-in-out infinite alternate;
-}
-@keyframes drift {
-  from { transform: translate3d(-1.5%, -1%, 0) scale(1); }
-  to   { transform: translate3d(2%, 1.5%, 0) scale(1.06); }
-}
-body::after {
-  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: .5;
-  background-image:
-    linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(75% 62% at 50% 0%, #000 0%, transparent 78%);
-  -webkit-mask-image: radial-gradient(75% 62% at 50% 0%, #000 0%, transparent 78%);
-}
-#app { position: relative; z-index: 1; display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; }
+#app { position: relative; z-index: 1; display: flex; height: 100%; min-height: 0; }
 
-/* ---------------------------------------------------------------- topbar */
-.topbar {
-  position: relative;
-  display: flex; align-items: center; gap: 9px; padding: 0 14px; height: var(--topbar-h);
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-2) 78%, transparent);
-  backdrop-filter: blur(16px) saturate(150%);
-}
-.topbar::after {
-  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
-  background: linear-gradient(90deg, transparent 5%, color-mix(in srgb, var(--acc1) 55%, transparent) 35%,
-              color-mix(in srgb, var(--acc2) 45%, transparent) 65%, transparent 95%);
-  opacity: .55; pointer-events: none;
-}
-.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.mark {
-  width: 30px; height: 30px; border-radius: 9px; flex: none; display: grid; place-items: center;
-  background:
-    linear-gradient(140deg, color-mix(in srgb, var(--acc1) 34%, transparent), color-mix(in srgb, var(--acc2) 24%, transparent));
-  border: 1px solid var(--line-2); box-shadow: var(--glow);
-}
-.mark svg { width: 17px; height: 17px; }
-.brand .name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.brand b {
-  font: 700 13px/1 var(--disp); letter-spacing: .14em;
-  background: linear-gradient(100deg, var(--fg) 20%, color-mix(in srgb, var(--acc2) 80%, var(--fg)));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.brand .ver {
-  font: 600 9px/1 var(--mono); color: var(--dim); letter-spacing: .08em;
-  border: 1px solid var(--line); border-radius: 999px; padding: 2px 6px;
-  background: color-mix(in srgb, var(--acc1) 10%, transparent);
-}
-.brand small { display: block; font: 500 9px/1.6 var(--mono); color: var(--dim-2); letter-spacing: .12em; }
-.grow { flex: 1; min-width: 0; }
+/* rail */
+.rail { width: var(--rail-w); flex: none; display: flex; flex-direction: column; align-items: center;
+  gap: 6px; padding: 10px 0 8px; border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-2) 88%, transparent); }
+.rail .logo { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; margin-bottom: 8px;
+  background: linear-gradient(140deg, var(--acc), color-mix(in srgb, var(--acc) 55%, #fff));
+  box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--acc) 90%, transparent); }
+.rail .logo svg { width: 19px; height: 19px; }
+.rbtn { width: 40px; height: 40px; border-radius: 11px; border: 1px solid transparent; background: transparent;
+  color: var(--dim); display: grid; place-items: center; cursor: pointer; position: relative;
+  transition: background .15s, color .15s, border-color .15s; }
+.rbtn svg { width: 19px; height: 19px; }
+.rbtn:hover { color: var(--fg); background: var(--panel-2); }
+.rbtn.active { color: var(--fg); background: var(--acc-soft); border-color: var(--acc-line); }
+.rbtn .badge { position: absolute; top: 4px; right: 4px; min-width: 15px; height: 15px; padding: 0 4px;
+  border-radius: 99px; background: var(--acc); color: #fff; font: 700 9px/15px var(--mono); text-align: center; }
+.rail .grow { flex: 1; }
+.rbtn .tip { position: absolute; left: calc(100% + 8px); top: 50%; transform: translateY(-50%);
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--fg);
+  font: 500 11px var(--mono); padding: 4px 9px; border-radius: 8px; white-space: nowrap;
+  opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 60; }
+.rbtn:hover .tip { opacity: 1; }
 
-.pill {
-  display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; flex: none;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
-  font: 500 11px/1.4 var(--mono); color: var(--dim); white-space: nowrap;
-}
-.pill b { color: var(--fg); font-weight: 600; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc3); flex: none;
-       box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc3) 18%, transparent); }
-.dot.bad  { background: var(--err);  box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 18%, transparent); }
-.dot.warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
+/* list column */
+.list-col { width: var(--list-w); flex: none; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--line); background: color-mix(in srgb, var(--bg-2) 55%, transparent); }
+.list-head { padding: 14px 14px 8px; display: flex; align-items: center; gap: 8px; flex: none; }
+.list-head b { font: 700 13px var(--disp); letter-spacing: .04em; }
+.list-head .grow { flex: 1; }
+.iconbtn { border: 1px solid var(--line); background: var(--panel); color: var(--dim);
+  border-radius: 8px; width: 26px; height: 26px; display: grid; place-items: center;
+  cursor: pointer; font-size: 13px; transition: color .15s, border-color .15s; }
+.iconbtn:hover { color: var(--fg); border-color: var(--acc-line); }
+#searchBox { padding: 0 12px 10px; flex: none; }
+#searchBox input { width: 100%; background: color-mix(in srgb, var(--bg) 70%, #000);
+  border: 1px solid var(--line); border-radius: 9px; color: var(--fg); font: 12px var(--mono);
+  padding: 7px 10px; outline: none; }
+#searchBox input:focus { border-color: var(--acc-line); }
+#listScroll { flex: 1; overflow-y: auto; padding: 2px 8px 12px; display: flex; flex-direction: column; gap: 3px; }
+.litem { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid transparent; cursor: pointer; color: var(--dim); text-align: left;
+  background: transparent; font: 12.5px var(--disp); width: 100%;
+  transition: background .14s, color .14s; }
+.litem:hover { background: var(--panel); color: var(--fg); }
+.litem.active { background: var(--acc-soft); border-color: var(--acc-line); color: var(--fg); }
+.litem .ic { flex: none; font-size: 14px; opacity: .9; }
+.litem .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.litem .sub { font-size: 10.5px; color: var(--dim-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.litem .del { flex: none; border: 0; background: transparent; color: var(--dim-2); cursor: pointer;
+  opacity: 0; font-size: 13px; padding: 2px 4px; border-radius: 6px; }
+.litem:hover .del { opacity: 1; }
+.litem .del:hover { color: var(--err); }
+.lgroup { font: 700 10px var(--mono); letter-spacing: .12em; color: var(--dim-2);
+  padding: 10px 8px 4px; text-transform: uppercase; }
+#listFoot { flex: none; padding: 8px 14px 12px; border-top: 1px solid var(--line); }
+#listFoot .foot-status { font: 10.5px var(--mono); color: var(--dim-2); display: flex; align-items: center; gap: 7px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
+.dot.bad { background: var(--err); } .dot.warn { background: var(--warn); }
 .dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
-@keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
-#where { max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-         font: 11px var(--mono); color: var(--dim); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
 
-button, select {
-  background: var(--panel); color: var(--fg); border: 1px solid var(--line);
-  border-radius: var(--radius-sm); padding: 6px 12px; font: 500 12px var(--mono);
-  cursor: pointer; transition: border-color .16s, color .16s, background .16s,
-                               transform .16s, box-shadow .16s, opacity .16s;
-}
-button:hover, select:hover {
-  border-color: color-mix(in srgb, var(--acc2) 55%, var(--line));
-  background: var(--panel-2);
-}
+/* content */
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.view[hidden] { display: none; }
+.viewbar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; flex: none; min-height: 46px;
+  border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg-2) 60%, transparent); }
+.viewbar b { font: 700 12.5px var(--disp); letter-spacing: .05em; }
+.viewbar .grow { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; flex: none;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+  font: 500 10.5px var(--mono); color: var(--dim); white-space: nowrap; }
+.pill b { color: var(--fg); font-weight: 600; }
+.tagx { font: 10px var(--mono); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px;
+  color: var(--dim); background: color-mix(in srgb, var(--bg) 45%, transparent); }
+.tagx.acc { color: var(--acc); border-color: var(--acc-line); }
+kbd { font: 9.5px var(--mono); border: 1px solid var(--line-2); border-bottom-width: 2px;
+  border-radius: 5px; padding: 1px 5px; color: var(--dim); background: var(--panel); }
+
+button, select, input, textarea { background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); font: 12.5px var(--mono); outline: none;
+  transition: border-color .15s, background .15s, color .15s, opacity .15s; }
+button { padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--acc-line); background: var(--panel-2); }
 button:active { transform: translateY(1px); }
-button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible,
-[tabindex]:focus-visible { outline: none; box-shadow: var(--glow); }
-button.primary {
-  background: var(--grad); color: #07070d; border: 0; font-weight: 700;
-  box-shadow: 0 6px 22px -10px color-mix(in srgb, var(--acc1) 85%, transparent);
-}
-button.primary:hover { filter: brightness(1.08); background: var(--grad); }
+button.primary { background: var(--acc); border-color: transparent; color: #fff; font-weight: 700;
+  box-shadow: 0 6px 18px -10px color-mix(in srgb, var(--acc) 95%, transparent); }
+button.primary:hover { filter: brightness(1.07); }
 button.ghost { background: transparent; }
-button.icon { padding: 6px 9px; }
-button[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
-button[disabled]:hover { border-color: var(--line); background: var(--panel); }
-select {
-  appearance: none; padding-right: 24px;
+button.icon { padding: 5px 9px; }
+button[disabled] { opacity: .45; cursor: not-allowed; }
+select { appearance: none; padding: 6px 24px 6px 10px; cursor: pointer;
   background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
                     linear-gradient(135deg, var(--dim) 50%, transparent 50%);
   background-position: right 11px center, right 6px center;
-  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
-}
-.kbd-btn { display: inline-flex; align-items: center; gap: 7px; }
-.kbd-btn kbd { margin: 0; }
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; }
+input, textarea { padding: 7px 10px; }
+textarea { resize: none; }
+input:focus, textarea:focus, select:focus { border-color: var(--acc-line); }
+input::placeholder, textarea::placeholder { color: var(--dim-2); }
 
-/* ------------------------------------------------------------- workspace */
-.main {
-  display: grid; grid-template-columns: minmax(0, 1fr) 6px var(--agentw);
-  min-height: 0;
-}
-body.resizing { cursor: col-resize; user-select: none; }
-body.resizing * { cursor: col-resize !important; }
-section.pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; }
-.resizer { position: relative; cursor: col-resize; }
-.resizer::before {
-  content: ""; position: absolute; inset: 0 2px; border-radius: 3px;
-  background: transparent; transition: background .18s;
-}
-.resizer:hover::before, body.resizing .resizer::before {
-  background: linear-gradient(180deg, transparent 6%,
-    color-mix(in srgb, var(--acc1) 60%, transparent) 50%, transparent 94%);
-}
-aside {
-  border-left: 1px solid var(--line); min-width: 0; min-height: 0;
-  display: flex; flex-direction: column;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--acc1) 4%, transparent), transparent 120px),
-    color-mix(in srgb, var(--bg-2) 74%, transparent);
-  backdrop-filter: blur(12px);
-}
-
-.subbar {
-  display: flex; align-items: center; gap: 8px; padding: 8px 12px; flex: none;
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-3) 40%, transparent);
-}
-#tabs {
-  display: flex; gap: 7px; padding: 8px 12px; border-bottom: 1px solid var(--line);
-  overflow-x: auto; align-items: stretch; scrollbar-width: thin; flex: none;
-}
-#tabs::-webkit-scrollbar { height: 6px; }
-#tabs::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
-.tab {
-  position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 12px; flex: none;
-  border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--panel);
-  font: 12px var(--mono); max-width: 250px; color: var(--fg); cursor: pointer;
-  transition: border-color .16s, background .16s, transform .16s;
-}
-.tab::before {
-  content: ""; width: 6px; height: 6px; border-radius: 50%; flex: none;
-  background: var(--acc3); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc3) 16%, transparent);
-}
-.tab:hover { border-color: var(--line-2); transform: translateY(-1px); }
-.tab.active {
-  border-color: transparent;
-  background: color-mix(in srgb, var(--acc1) 15%, var(--panel));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc1) 60%, transparent);
-}
-.tab.active::after {
-  content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px; height: 2px;
-  border-radius: 2px; background: var(--grad);
-}
-.tab em { font-style: normal; color: var(--dim-2); font-size: 11px;
-          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 12ch; }
-.tab .x { color: var(--dim-2); padding: 0 2px; border-radius: 4px; opacity: .55; transition: opacity .15s, color .15s; }
-.tab:hover .x { opacity: 1; }
-.tab .x:hover { color: var(--err); }
-.tab.closed { opacity: .45; }
-.tab.closed::before { background: var(--dim-2); box-shadow: none; }
-
-#screen {
-  flex: 1; min-height: 0; padding: 12px 10px 12px 16px; overflow: hidden; position: relative;
-  transition: box-shadow .25s;
-}
-#screen::before {
-  content: ""; position: absolute; inset: 0; pointer-events: none;
-  background: radial-gradient(120% 90% at 50% -20%, color-mix(in srgb, var(--acc1) 5%, transparent), transparent 55%);
-}
-#screen:focus-within { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc1) 22%, transparent); }
-#screen .xterm { height: 100%; }
-#screen .xterm-viewport::-webkit-scrollbar { width: 8px; }
-#screen .xterm-viewport::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
-pre.plain {
-  margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word-break: break-word;
-  font: 13px/1.5 var(--mono); color: var(--term-fg);
-}
-.screen-note { font: 11px var(--mono); color: var(--warn); padding: 2px 0 6px; }
-
-.empty { display: grid; place-items: center; height: 100%; text-align: center; color: var(--dim); }
-.empty .box {
-  max-width: 46ch; padding: 28px 30px; border: 1px solid var(--line); border-radius: var(--radius);
-  background:
-    radial-gradient(80% 100% at 50% 0%, color-mix(in srgb, var(--acc1) 8%, transparent), transparent 70%),
-    var(--panel);
-  box-shadow: var(--raise);
-}
-.empty h2 { font: 700 14px/1.4 var(--disp); letter-spacing: .14em; color: var(--fg); margin: 0 0 8px; }
-.empty p { font-size: 12.5px; margin: 0 0 16px; line-height: 1.65; }
-
-/* ------------------------------------------------------------- statusbar */
-.statusbar {
-  flex: none; display: flex; align-items: center; gap: 14px; height: 30px; padding: 0 14px;
-  border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-2) 82%, transparent);
-  font: 500 10.5px var(--mono); color: var(--dim-2); white-space: nowrap; overflow: hidden;
-}
-.statusbar .sb-left { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
-.statusbar .sb-left::before { content: "●"; color: var(--acc3); font-size: 8px; margin-right: 7px; }
-.statusbar .sb-item { display: inline-flex; align-items: center; gap: 5px; flex: none; }
-.statusbar kbd { margin: 0; }
-
-/* --------------------------------------------------------------- agent */
-#log { flex: 1; min-height: 0; overflow: auto; padding: 14px 14px 10px;
-       display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }
-#log::-webkit-scrollbar { width: 8px; }
-#log::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
-.msg {
-  position: relative; border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 11px 13px; white-space: pre-wrap; word-break: break-word;
-  font: 12.5px/1.6 var(--mono); background: var(--panel);
-  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
-  animation: rise .22s ease-out;
-}
+/* chat */
+#chatMessages { flex: 1; overflow-y: auto; padding: 22px 18px 12px; scroll-behavior: smooth; }
+#chatMessages .inner { max-width: 860px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.msg { position: relative; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 11px 14px; font: 13px/1.65 var(--disp); background: var(--panel);
+  white-space: pre-wrap; word-break: break-word; box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+  animation: rise .2s ease-out; }
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
-.msg::before {
-  content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px;
-  border-radius: 2px; background: var(--line-2);
-}
-.msg.you { background: color-mix(in srgb, var(--acc2) 8%, var(--panel));
-           border-color: color-mix(in srgb, var(--acc2) 28%, var(--line)); }
-.msg.you::before { background: var(--acc2); }
-.msg.bot { background: color-mix(in srgb, var(--acc1) 8%, var(--panel));
-           border-color: color-mix(in srgb, var(--acc1) 24%, var(--line)); }
-.msg.bot::before { background: var(--acc1); }
-.msg.tool { background: color-mix(in srgb, var(--acc3) 6%, var(--panel)); }
-.msg.tool::before { background: var(--acc3); }
+.msg .who { font: 700 9.5px var(--mono); letter-spacing: .14em; color: var(--dim);
+  display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.msg .who::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--dim-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dim-2) 18%, transparent); }
+.msg.you { background: color-mix(in srgb, var(--acc) 7%, var(--panel));
+  border-color: color-mix(in srgb, var(--acc) 26%, var(--line)); }
+.msg.you .who { color: var(--acc); }
+.msg.you .who::before { background: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
+.msg.bot .who::before { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .msg.err { border-color: color-mix(in srgb, var(--err) 55%, var(--line)); color: var(--err); }
-.msg.err::before { background: var(--err); }
 .msg .body { overflow-wrap: anywhere; }
-.who { font: 700 9.5px var(--mono); letter-spacing: .14em; color: var(--dim);
-       display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
-.who::before { content: ""; width: 6px; height: 6px; border-radius: 50%;
-               background: var(--dim-2); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dim-2) 18%, transparent); }
-.msg.you .who::before { background: var(--acc2); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc2) 18%, transparent); }
-.msg.bot .who::before { background: var(--acc1); box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc1) 20%, transparent); }
-.msg.err .who::before { background: var(--err); }
-.msg.tool .who::before { background: var(--acc3); }
-.msg .copy {
-  position: absolute; top: 8px; right: 9px; opacity: 0; transition: opacity .15s;
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
-  padding: 2px 8px; font: 10px var(--mono); color: var(--dim); cursor: pointer;
-}
-.msg:hover .copy, .msg:focus-within .copy { opacity: 1; }
-.msg pre.codeblock {
-  margin: 8px 0 2px; padding: 10px 12px; overflow: auto; white-space: pre-wrap;
-  background: color-mix(in srgb, var(--bg) 78%, #000);
-  border: 1px solid var(--line); border-radius: 9px;
-  font: 11.5px/1.6 var(--mono); color: var(--term-fg);
-}
+.msg .copy, .msg .regen { position: absolute; top: 7px; opacity: 0; transition: opacity .15s;
+  border: 1px solid var(--line); background: var(--panel-2); border-radius: 7px;
+  padding: 2px 8px; font: 10px var(--mono); color: var(--dim); cursor: pointer; }
+.msg .copy { right: 8px; } .msg .regen { right: 52px; }
+.msg:hover .copy, .msg:hover .regen, .msg:focus-within .copy { opacity: 1; }
+.msg .copy:hover, .msg .regen:hover { color: var(--fg); border-color: var(--acc-line); }
+.msg pre.codeblock { margin: 9px 0 2px; padding: 10px 12px; overflow: auto; white-space: pre-wrap;
+  background: color-mix(in srgb, var(--bg) 78%, #000); border: 1px solid var(--line);
+  border-radius: 9px; font: 11.5px/1.6 var(--mono); color: var(--term-fg); position: relative; }
+.msg pre.codeblock .code-copy { position: absolute; top: 6px; right: 6px; border: 1px solid var(--line);
+  background: var(--panel-2); border-radius: 6px; padding: 1px 7px; font: 9.5px var(--mono);
+  color: var(--dim); cursor: pointer; }
+.msg pre.codeblock .code-copy:hover { color: var(--fg); border-color: var(--acc-line); }
 .msg code { font: 11.5px var(--mono); color: var(--acc2); }
-/* typing indicator — three breathing dots */
-.msg .dots { display: inline-flex; gap: 5px; padding: 5px 0 2px; }
-.msg .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--acc1);
-               animation: breathe 1.2s ease-in-out infinite; }
-.msg .dots i:nth-child(2) { animation-delay: .18s; }
-.msg .dots i:nth-child(3) { animation-delay: .36s; }
-@keyframes breathe { 0%,80%,100% { opacity: .18; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
-
-details.step {
-  border: 1px dashed color-mix(in srgb, var(--acc2) 26%, var(--line)); border-radius: var(--radius-sm);
-  padding: 7px 11px; font: 11.5px var(--mono); color: var(--dim); background: color-mix(in srgb, var(--bg) 40%, transparent);
-}
-details.step summary { cursor: pointer; color: var(--acc2); outline: none; user-select: none;
-                       display: flex; align-items: center; gap: 7px; list-style: none; }
+.msg .imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 9px; }
+.msg .imgs img { max-width: 210px; max-height: 210px; border-radius: 10px; border: 1px solid var(--line); cursor: zoom-in; }
+.dots { display: inline-flex; gap: 5px; padding: 4px 0 2px; }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--acc);
+  animation: breathe 1.2s ease-in-out infinite; }
+.dots i:nth-child(2) { animation-delay: .18s; } .dots i:nth-child(3) { animation-delay: .36s; }
+@keyframes breathe { 0%,80%,100%{opacity:.18; transform:translateY(0)} 40%{opacity:1; transform:translateY(-2px)} }
+details.step { border: 1px dashed color-mix(in srgb, var(--acc) 26%, var(--line));
+  border-radius: var(--radius-sm); padding: 7px 11px; font: 11.5px var(--mono); color: var(--dim);
+  background: color-mix(in srgb, var(--bg) 40%, transparent); margin: 0; }
+details.step summary { cursor: pointer; color: var(--acc); outline: none; user-select: none;
+  display: flex; align-items: center; gap: 7px; list-style: none; }
 details.step summary::-webkit-details-marker { display: none; }
 details.step summary::before { content: "▸"; color: var(--dim-2); font-size: 10px; transition: transform .15s; }
 details.step[open] summary::before { transform: rotate(90deg); }
-details.step pre {
-  margin: 9px 0 2px; padding: 9px 11px; white-space: pre-wrap; word-break: break-word; color: var(--dim);
-  background: color-mix(in srgb, var(--bg) 70%, #000); border: 1px solid var(--line); border-radius: 8px;
-}
-details.step[data-tool="run_command"] { border-color: color-mix(in srgb, var(--acc1) 30%, var(--line)); }
-details.step[data-tool="run_command"] summary { color: var(--acc1); }
-
-.chips { display: flex; gap: 6px; padding: 0 12px 10px; flex-wrap: wrap; flex: none; }
-.chips:empty { display: none; }
-.chip {
-  border: 1px dashed var(--line-2); border-radius: 999px; padding: 4px 11px;
-  font: 10.5px var(--mono); color: var(--dim); background: transparent; cursor: pointer;
-  transition: color .15s, border-color .15s, background .15s;
-}
-.chip:hover { color: var(--fg); border-color: var(--acc2); border-style: solid;
-              background: color-mix(in srgb, var(--acc2) 8%, transparent); }
-
-.local-engines { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; }
-.local-engines .engine { display: flex; align-items: center; gap: 8px;
-  padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px;
-  background: color-mix(in srgb, var(--bg-3) 42%, transparent); font-size: 11.5px; }
-.local-engines .engine b { color: var(--acc2); }
-.local-engines .engine .meta { color: var(--dim); flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.local-engines .engine button { padding: 4px 10px; font-size: 11px; }
-
-.providers { border-top: 1px solid var(--line); padding: 10px 12px; flex: none;
-             background: color-mix(in srgb, var(--bg-3) 42%, transparent); }
-.providers[hidden] { display: none; }
-.list { max-height: 148px; overflow: auto; display: flex; flex-direction: column; gap: 5px; margin-bottom: 8px; }
-.prov { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line);
-        border-radius: var(--radius-sm); padding: 5px 8px; font: 11px var(--mono); background: var(--panel); }
-.prov.active { border-color: color-mix(in srgb, var(--acc1) 60%, var(--line));
-               box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc1) 30%, transparent);
-               background: color-mix(in srgb, var(--acc1) 7%, var(--panel)); }
-.prov .u { flex: 1; color: var(--dim-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.prov b { color: var(--fg); }
-
-form { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); flex: none; }
-form.stack { flex-direction: column; gap: 7px; padding: 0; border: 0; }
-textarea, input, select {
-  background: color-mix(in srgb, var(--bg) 72%, #000); color: var(--fg);
-  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 11px; font: 12px var(--mono);
-  transition: border-color .16s, box-shadow .16s;
-}
-textarea:focus, input:focus, select:focus { border-color: color-mix(in srgb, var(--acc1) 55%, var(--line)); box-shadow: var(--glow); }
-textarea { resize: none; min-height: 42px; max-height: 140px; }
-textarea::placeholder, input::placeholder { color: var(--dim-2); }
-.hint { font: 11px/1.6 var(--mono); color: var(--dim-2); padding: 0 12px 8px; }
-kbd { font: 9.5px var(--mono); border: 1px solid var(--line-2); border-bottom-width: 2px;
-      border-radius: 5px; padding: 1px 5px; color: var(--dim); background: var(--panel); }
-
-/* agent identity orb */
-.orb {
-  width: 22px; height: 22px; border-radius: 50%; flex: none; position: relative;
-  background: conic-gradient(from 140deg, var(--acc1), var(--acc2), var(--acc3), var(--acc1));
-  box-shadow: 0 0 14px -2px color-mix(in srgb, var(--acc1) 70%, transparent);
-}
-.orb::after {
-  content: ""; position: absolute; inset: 3px; border-radius: 50%;
-  background: var(--bg-2);
-}
-.orb.on::before {
-  content: ""; position: absolute; inset: -4px; border-radius: 50%;
-  border: 1px solid color-mix(in srgb, var(--acc1) 45%, transparent);
-  animation: orb 2.4s ease-in-out infinite;
-}
-@keyframes orb { 0%,100% { transform: scale(1); opacity: .8; } 50% { transform: scale(1.14); opacity: .25; } }
-.orb.bad { background: none; box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--err) 60%, transparent); }
-.orb.bad::after { background: color-mix(in srgb, var(--err) 30%, transparent); }
-
-/* --------------------------------------------------- reasoning (live AI thinking) */
-.msg.reasoning {
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--acc1) 32%, var(--line));
-  background: linear-gradient(160deg,
-    color-mix(in srgb, var(--acc1) 10%, var(--panel)),
-    color-mix(in srgb, var(--acc2) 6%, var(--panel)));
-}
-.msg.reasoning::before { background: var(--grad); }
-.think-status { display: flex; align-items: center; gap: 10px;
-                font: 500 11.5px var(--mono); color: var(--dim); }
-.think-line {
-  background: linear-gradient(90deg, var(--dim) 20%, var(--fg) 50%, var(--dim) 80%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-  animation: shimmer 2.2s linear infinite;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
-}
-@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
-.msg.reasoning.done .think-line { background: none; -webkit-text-fill-color: var(--acc3);
-                                  color: var(--acc3); animation: none; }
+details.step pre { margin: 9px 0 2px; padding: 9px 11px; white-space: pre-wrap; word-break: break-word;
+  color: var(--dim); background: color-mix(in srgb, var(--bg) 70%, #000);
+  border: 1px solid var(--line); border-radius: 8px; }
+.msg.reasoning { border-style: solid; border-color: color-mix(in srgb, var(--acc) 30%, var(--line));
+  background: linear-gradient(160deg, var(--acc-soft), transparent 130%); }
+.msg.reasoning .who::before { background: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
+.think-status { display: flex; align-items: center; gap: 10px; font: 500 11.5px var(--mono); color: var(--dim); }
+.think-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.msg.reasoning.done .think-line { color: var(--ok); }
 .think-trace { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-.think-trace details.step { margin: 0; }
-.think-label { font: 700 9px var(--mono); letter-spacing: .14em; color: var(--dim-2);
-               text-transform: uppercase; margin-bottom: 6px; }
 
-/* ---------------------------------------------------------- composer (expanded) */
-.composer-wrap {
-  flex: none; border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-3) 45%, transparent);
-}
-form#composer { border-top: 0; padding: 9px 12px 6px; align-items: flex-end; gap: 9px; }
-#input {
-  min-height: 84px; max-height: 240px; line-height: 1.55;
-  padding: 10px 12px;
-}
-.composer-meta { display: flex; align-items: center; gap: 9px; padding: 0 14px 10px; }
-.composer-meta .tagx { flex: none; }
-.composer-meta .hint { padding: 0; flex: 1; min-width: 0; overflow: hidden;
-                       text-overflow: ellipsis; white-space: nowrap; }
-.cm-keys { flex: none; white-space: nowrap; color: var(--dim-2); }
+/* composer */
+.composer-wrap { flex: none; padding: 10px 18px 14px; border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-2) 55%, transparent); }
+#composer { max-width: 860px; margin: 0 auto; border: 1px solid var(--line); border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-3) 88%, transparent); padding: 9px 10px 8px;
+  display: flex; flex-direction: column; gap: 8px;
+  transition: border-color .15s, box-shadow .15s; }
+#composer:focus-within { border-color: var(--acc-line);
+  box-shadow: 0 8px 30px -18px color-mix(in srgb, var(--acc) 80%, transparent); }
+#composer .row1 { display: flex; align-items: flex-end; gap: 9px; }
+#input { flex: 1; min-height: 46px; max-height: 200px; background: transparent; border: 0;
+  font: 13px/1.55 var(--disp); padding: 8px 6px; }
+#input:focus { border: 0; }
+.attach-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; font-size: 11px; }
+.att-preview { display: flex; flex-wrap: wrap; gap: 7px; }
+.att-preview:empty { display: none; }
+.att-preview .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  background: var(--panel); border-radius: 999px; padding: 3px 9px; font: 11px var(--mono); color: var(--dim); }
+.att-preview .chip button { border: 0; background: transparent; color: var(--dim-2); padding: 0 2px; cursor: pointer; }
+.composer-tools { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.composer-tools .grow { flex: 1; }
+#assistantPick { max-width: 170px; }
+#modelPick { max-width: 190px; }
+.cm-keys { font: 10px var(--mono); color: var(--dim-2); white-space: nowrap; }
 
-/* --------------------------------------------------------- live browser */
-.seg {
-  display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  overflow: hidden; background: color-mix(in srgb, var(--bg) 55%, transparent);
-}
-.segbtn {
-  border: 0; border-radius: 0; background: transparent; color: var(--dim);
-  padding: 6px 14px; font: 500 11.5px var(--mono);
-  display: inline-flex; align-items: center; gap: 6px;
-}
-.segbtn:hover { color: var(--fg); background: var(--panel-2); }
-.segbtn.active {
-  color: var(--fg); background: color-mix(in srgb, var(--acc1) 16%, transparent);
-  box-shadow: inset 0 -2px 0 0 var(--acc1);
-}
-.segbtn .dot { margin-left: 2px; }
+/* terminal */
+#tabs { display: flex; gap: 7px; padding: 8px 14px; border-bottom: 1px solid var(--line);
+  overflow-x: auto; flex: none; }
+.tab { position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 12px;
+  flex: none; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--panel);
+  font: 12px var(--mono); max-width: 250px; color: var(--fg); cursor: pointer;
+  transition: border-color .15s, background .15s; }
+.tab::before { content: ""; width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
+.tab:hover { border-color: var(--line-2); }
+.tab.active { border-color: transparent; background: var(--acc-soft); box-shadow: inset 0 0 0 1px var(--acc-line); }
+.tab em { font-style: normal; color: var(--dim-2); font-size: 11px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; max-width: 12ch; }
+.tab .x { color: var(--dim-2); padding: 0 2px; border-radius: 4px; opacity: .55; }
+.tab:hover .x { opacity: 1; } .tab .x:hover { color: var(--err); }
+.tab.closed { opacity: .45; } .tab.closed::before { background: var(--dim-2); box-shadow: none; }
+#screen { flex: 1; min-height: 0; padding: 10px 8px 10px 14px; overflow: hidden; position: relative; }
+#screen .xterm { height: 100%; }
+pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font: 13px/1.5 var(--mono); color: var(--term-fg); }
+.screen-note { font: 11px var(--mono); color: var(--warn); padding: 2px 0 6px; }
+.empty { display: grid; place-items: center; height: 100%; text-align: center; color: var(--dim); }
+.empty .box { max-width: 46ch; padding: 26px 28px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: radial-gradient(80% 100% at 50% 0%, var(--acc-soft), transparent 70%), var(--panel); }
+.empty h2 { font: 700 14px/1.4 var(--disp); letter-spacing: .12em; color: var(--fg); margin: 0 0 8px; }
+.empty p { font-size: 12.5px; margin: 0 0 14px; line-height: 1.65; }
 
-#browserView {
-  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0;
-  padding: 10px 14px 12px; overflow: hidden;
-}
-#browserView[hidden] { display: none; }
-.bbar {
-  display: flex; align-items: center; gap: 7px; padding: 7px 8px; margin-bottom: 8px;
-  border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-2) 70%, transparent);
-}
-.bbar input {
-  flex: 1; min-width: 0; font: 12px var(--mono);
-  background: color-mix(in srgb, var(--bg) 72%, #000);
-}
-.bmeta { display: flex; align-items: center; gap: 6px; padding-bottom: 8px; }
+/* browser */
+#browserView { padding: 10px 14px 12px; gap: 8px; }
+.bbar { display: flex; align-items: center; gap: 7px; flex: none; }
+.bbar input { flex: 1; min-width: 0; font: 12px var(--mono); background: color-mix(in srgb, var(--bg) 72%, #000); }
+.bmeta { display: flex; align-items: center; gap: 6px; flex: none; }
 .bmeta .tagx { max-width: 42ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.bstage {
-  flex: 1; min-height: 0; position: relative; border: 1px solid var(--line);
-  border-radius: var(--radius); overflow: hidden;
-  background:
-    radial-gradient(100% 60% at 50% 0%, color-mix(in srgb, var(--acc1) 4%, transparent), transparent 60%),
-    #0b0b10;
-  box-shadow: var(--raise);
-}
-.bempty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
-.bempty .box {
-  max-width: 46ch; padding: 28px 30px; border: 1px solid var(--line); border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg-2) 70%, transparent); box-shadow: var(--raise);
-}
-.bempty h2 { font: 700 14px/1.4 var(--disp); letter-spacing: .14em; margin: 0 0 8px; color: var(--fg); }
-.bempty p { font-size: 12.5px; color: var(--dim); margin: 0 0 14px; line-height: 1.65; }
-#bFrame {
-  display: block; width: 100%; height: 100%; object-fit: contain;
-  object-position: top center; cursor: crosshair; background: #0b0b10;
-}
-#bFrame[hidden] { display: none; }
-.bfoot { display: flex; align-items: center; gap: 7px; padding-top: 9px; }
+.bstage { flex: 1; min-height: 0; position: relative; border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; background: color-mix(in srgb, var(--bg) 60%, #000); }
+#bFrame { display: block; width: 100%; height: 100%; object-fit: contain; object-position: top center; cursor: crosshair; }
+.bfoot { display: flex; align-items: center; gap: 7px; flex: none; }
 .bfoot input { flex: 1; min-width: 0; font: 12px var(--mono); }
-.bfoot .hint { padding: 0; white-space: nowrap; }
+.bfoot .hint, .hint { font: 10.5px/1.6 var(--mono); color: var(--dim-2); }
+.bfoot .hint { white-space: nowrap; }
 
-/* ------------------------------------------------------------ extensions */
-.drawer {
-  position: fixed; inset: 0; z-index: 35; display: flex; flex-direction: column;
-  background: color-mix(in srgb, var(--bg) 96%, transparent);
-  backdrop-filter: blur(22px) saturate(140%);
-  animation: fade .18s ease-out;
-}
-.drawer[hidden] { display: none; }
-@keyframes fade { from { opacity: 0 } }
-.drawer-head {
-  display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex: none;
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-2) 80%, transparent);
-}
-.drawer-head .pill b { font: 700 12px var(--disp); letter-spacing: .12em; }
-.drawer .tabs {
-  display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--line);
-  overflow-x: auto; flex: none; scrollbar-width: thin;
-}
-.exttab {
-  border: 1px solid transparent; border-bottom: 0; background: transparent;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0; color: var(--dim);
-  padding: 8px 14px; font: 500 12px var(--mono); cursor: pointer; white-space: nowrap;
-  transition: color .15s, background .15s;
-}
-.exttab:hover { color: var(--fg); background: var(--panel); }
-.exttab.active {
-  color: var(--fg); border-color: var(--line); background: var(--panel);
-  box-shadow: inset 0 2px 0 0 var(--acc1);
-}
-.drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 22px 20px 48px; }
-.drawer-body .extpane { display: none; max-width: 1040px; margin: 0 auto; }
-.drawer-body .extpane.active { display: block; animation: rise .2s ease-out; }
-.lead { color: var(--dim); font-size: 13px; margin: 0 0 18px; line-height: 1.7; max-width: 72ch; }
-.lead code, .hint code { font: 11.5px var(--mono); color: var(--acc2);
-  background: color-mix(in srgb, var(--acc2) 10%, transparent); padding: 1px 5px; border-radius: 5px; }
+/* paintings */
+#paintingsView { padding: 12px 18px; gap: 10px; }
+.pbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none; }
+.pbar input { flex: 1; min-width: 200px; font: 12.5px var(--disp); padding: 8px 12px; }
+#paintingsStage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#paintingsGrid { flex: 1; overflow-y: auto; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; padding: 4px 2px 12px; }
+.pcard { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
+  background: var(--panel); display: flex; flex-direction: column;
+  transition: border-color .15s, transform .15s; }
+.pcard:hover { border-color: var(--acc-line); transform: translateY(-2px); }
+.pcard img { width: 100%; aspect-ratio: 1; object-fit: cover; cursor: zoom-in;
+  background: color-mix(in srgb, var(--bg) 70%, #000); }
+.pcard .pmeta { padding: 7px 9px; font: 10px var(--mono); color: var(--dim-2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.pcard .pmeta .grow { flex: 1; }
+.pcard .pmeta button { border: 0; background: transparent; color: var(--dim); cursor: pointer;
+  font-size: 11px; padding: 1px 4px; }
+.pcard .pmeta button:hover { color: var(--acc); }
+.pempty { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--dim); }
+.pempty .box { max-width: 46ch; padding: 26px 28px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: radial-gradient(80% 100% at 50% 0%, var(--acc-soft), transparent 70%), var(--panel); }
+.pempty h2 { font: 700 14px/1.4 var(--disp); letter-spacing: .12em; color: var(--fg); margin: 0 0 8px; }
+.pempty p { font-size: 12.5px; margin: 0 0 14px; line-height: 1.65; }
 
-.cards { display: grid; gap: 10px; margin-bottom: 18px; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
-.card {
-  border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
-  padding: 14px 16px; display: flex; flex-direction: column; gap: 9px;
-  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
-  transition: border-color .16s, transform .16s, box-shadow .16s;
-}
-.card:hover { border-color: color-mix(in srgb, var(--acc2) 30%, var(--line)); }
+#lightbox { position: fixed; inset: 0; z-index: 80; background: rgba(5,5,10,.88);
+  display: grid; place-items: center; cursor: zoom-out; }
+#lightbox img { max-width: 92vw; max-height: 92vh; border-radius: 12px;
+  box-shadow: 0 30px 80px -30px rgba(0,0,0,.9); }
+
+/* settings */
+#settingsView { padding: 18px 22px 40px; overflow-y: auto; }
+#settingsView .inner { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+.card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .card > b { font: 600 12px var(--disp); letter-spacing: .08em; }
 .card .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .card .row3 { display: grid; grid-template-columns: auto 1fr auto; gap: 9px; align-items: center; }
 @media (max-width: 620px) { .card .row2, .card .row3 { grid-template-columns: 1fr; } }
-
-.item {
-  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel);
-  padding: 11px 13px; display: flex; flex-direction: column; gap: 8px;
-  transition: border-color .16s, transform .16s, opacity .16s;
-}
-.item:hover { border-color: color-mix(in srgb, var(--acc2) 34%, var(--line)); transform: translateY(-1px); }
-.item.on { border-color: color-mix(in srgb, var(--acc3) 38%, var(--line)); }
-.item.off { opacity: .55; }
+.lead { color: var(--dim); font-size: 12.5px; margin: 0; line-height: 1.7; }
+.lead code, .hint code { font: 11px var(--mono); color: var(--acc2);
+  background: color-mix(in srgb, var(--acc) 9%, transparent); padding: 1px 5px; border-radius: 5px; }
+.list { max-height: 170px; overflow: auto; display: flex; flex-direction: column; gap: 5px; }
+.prov { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 5px 9px; font: 11px var(--mono); background: var(--panel); }
+.prov.active { border-color: var(--acc-line); background: var(--acc-soft); }
+.prov .u { flex: 1; color: var(--dim-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov b { color: var(--fg); }
+.item { border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel);
+  padding: 11px 13px; display: flex; flex-direction: column; gap: 8px; }
 .item .top { display: flex; align-items: center; gap: 9px; }
-.item .top b { font: 600 12.5px var(--disp); letter-spacing: .02em; }
+.item .top b { font: 600 12.5px var(--disp); }
 .item .top .grow { flex: 1; }
 .item .meta { font: 11px/1.6 var(--mono); color: var(--dim-2); word-break: break-all; }
 .item .tools { display: flex; flex-wrap: wrap; gap: 5px; }
-.tagx {
-  font: 10px var(--mono); border: 1px solid var(--line); border-radius: 999px;
-  padding: 2px 8px; color: var(--dim); background: color-mix(in srgb, var(--bg) 45%, transparent);
-}
-.tagx.acc { color: var(--acc3); border-color: color-mix(in srgb, var(--acc3) 40%, var(--line)); }
 .item .acts { display: flex; gap: 6px; flex-wrap: wrap; }
 .item .acts button { padding: 4px 10px; font-size: 11px; }
+.item.on { border-color: color-mix(in srgb, var(--ok) 38%, var(--line)); }
+.item.off { opacity: .55; }
+.cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.out { background: color-mix(in srgb, var(--bg) 70%, #000); border: 1px solid var(--line);
+  border-radius: 9px; padding: 10px 12px; font: 11px/1.6 var(--mono); color: var(--term-fg);
+  overflow: auto; white-space: pre-wrap; }
+.bad-line { color: var(--err); font: 11.5px var(--mono); }
+.engine { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line);
+  border-radius: 8px; background: color-mix(in srgb, var(--bg-3) 42%, transparent); font-size: 11.5px; }
+.engine b { color: var(--acc2); }
+.engine .meta { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.engine button { padding: 4px 10px; font-size: 11px; }
 
-.drop {
-  border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 26px;
+/* drawers */
+.drawer { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+  background: color-mix(in srgb, var(--bg) 96%, transparent);
+  backdrop-filter: blur(18px) saturate(140%); animation: fade .16s ease-out; }
+@keyframes fade { from { opacity: 0 } }
+.drawer[hidden] { display: none; }
+.drawer-head { display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex: none;
+  border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg-2) 80%, transparent); }
+.drawer-head .pill b { font: 700 12px var(--disp); letter-spacing: .12em; }
+.drawer .tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--line);
+  overflow-x: auto; flex: none; }
+.exttab { border: 1px solid transparent; border-bottom: 0; background: transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0; color: var(--dim);
+  padding: 8px 14px; font: 500 12px var(--mono); cursor: pointer; white-space: nowrap; }
+.exttab:hover { color: var(--fg); background: var(--panel); }
+.exttab.active { color: var(--fg); border-color: var(--line); background: var(--panel);
+  box-shadow: inset 0 2px 0 0 var(--acc); }
+.drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 22px 20px 48px; }
+.drawer-body .extpane { display: none; max-width: 1040px; margin: 0 auto; }
+.drawer-body .extpane.active { display: block; animation: rise .2s ease-out; }
+.drop { border: 1px dashed var(--line-2); border-radius: var(--radius); padding: 26px;
   text-align: center; cursor: pointer; display: flex; flex-direction: column; gap: 5px; align-items: center;
-  margin-bottom: 18px; transition: border-color .16s, background .16s;
-  background: color-mix(in srgb, var(--bg-2) 45%, transparent);
-}
-.drop:hover, .drop.over { border-color: var(--acc2); background: color-mix(in srgb, var(--acc2) 7%, transparent); }
-.drop b { font: 600 12.5px var(--disp); }
-pre.out {
-  margin: 0; padding: 11px 13px; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg) 80%, #000); font: 11.5px/1.6 var(--mono);
-  color: var(--term-fg); overflow: auto; max-height: 320px; white-space: pre-wrap;
-}
-.ok-line { font: 11.5px var(--mono); color: var(--acc3); }
-.bad-line { font: 11.5px var(--mono); color: var(--err); }
+  transition: border-color .15s, background .15s; }
+.drop:hover, .drop.over { border-color: var(--acc-line); background: var(--acc-soft); }
 
-/* ---------------------------------------------------------------- toasts */
-#toasts { position: fixed; right: 14px; bottom: 44px; z-index: 40; display: flex;
-          flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; }
-.toast {
-  border: 1px solid var(--line-2); border-left: 2px solid var(--acc2); border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-2) 94%, transparent); backdrop-filter: blur(12px);
-  padding: 9px 13px; font: 11.5px var(--mono); color: var(--fg); max-width: 46ch;
-  box-shadow: 0 14px 34px -18px rgba(0,0,0,.9);
-  animation: slide .22s ease-out;
-}
-.toast.err { border-left-color: var(--err); }
-.toast.ok  { border-left-color: var(--acc3); }
-@keyframes slide { from { opacity: 0; transform: translateY(6px) } }
-
-/* --------------------------------------------------------------- palette */
-.palette-wrap { position: fixed; inset: 0; z-index: 45; }
-.palette-backdrop {
-  position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) 62%, transparent);
-  backdrop-filter: blur(6px); animation: fade .16s ease-out;
-}
-.palette {
-  position: relative; margin: 14vh auto 0; width: min(580px, 92vw);
-  border: 1px solid var(--line-2); border-radius: 16px; overflow: hidden;
-  background: color-mix(in srgb, var(--bg-2) 92%, transparent);
-  box-shadow: 0 30px 80px -20px rgba(0,0,0,.85), var(--glow);
-  animation: palin .18s cubic-bezier(.2,.9,.3,1.2);
-}
-@keyframes palin { from { opacity: 0; transform: translateY(-10px) scale(.98); } }
-.palette-head {
-  display: flex; align-items: center; gap: 10px; padding: 12px 16px;
-  border-bottom: 1px solid var(--line);
-}
+/* toasts + palette */
+#toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: flex; flex-direction: column; gap: 8px; }
+.toast { border: 1px solid var(--line); background: color-mix(in srgb, var(--bg-3) 92%, transparent);
+  color: var(--fg); border-radius: 10px; padding: 9px 14px; font: 12px var(--mono);
+  box-shadow: 0 14px 34px -18px rgba(0,0,0,.8); animation: rise .2s ease-out; }
+.toast.ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.toast.err { border-color: color-mix(in srgb, var(--err) 55%, var(--line)); color: var(--err); }
+.palette-wrap { position: fixed; inset: 0; z-index: 70; display: grid; place-items: start center; padding-top: 12vh; }
+.palette-backdrop { position: absolute; inset: 0; background: rgba(5,5,10,.55); }
+.palette { position: relative; width: min(560px, 92vw); border: 1px solid var(--line-2); border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-2) 97%, transparent); backdrop-filter: blur(20px);
+  box-shadow: 0 40px 90px -40px rgba(0,0,0,.9); overflow: hidden; }
+.palette-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .palette-head svg { width: 15px; height: 15px; color: var(--dim); flex: none; }
-.palette-head input {
-  flex: 1; border: 0; background: transparent; padding: 4px 0; font: 13px var(--mono); color: var(--fg);
-}
-.palette-head input:focus { box-shadow: none; }
-.palette-list { list-style: none; margin: 0; padding: 6px; max-height: 320px; overflow: auto; }
-.palette-list:empty::after {
-  content: "no matching command"; display: block; padding: 16px; text-align: center;
-  font: 11.5px var(--mono); color: var(--dim-2);
-}
-.pal-item {
-  display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
-  border: 0; background: transparent; border-radius: 9px; padding: 9px 11px;
-  font: 12.5px var(--mono); color: var(--fg); cursor: pointer;
-}
-.pal-item:hover { background: var(--panel-2); }
-.pal-item.active { background: color-mix(in srgb, var(--acc1) 16%, transparent);
-                   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc1) 40%, transparent); }
-.pal-ic {
-  width: 22px; height: 22px; border-radius: 6px; flex: none; display: grid; place-items: center;
-  font-size: 11px; color: var(--acc2); background: color-mix(in srgb, var(--acc2) 10%, transparent);
-  border: 1px solid color-mix(in srgb, var(--acc2) 24%, transparent);
-}
+.palette-head input { flex: 1; background: transparent; border: 0; font: 13px var(--disp); color: var(--fg); }
+.palette-head input:focus { border: 0; }
+.palette-list { list-style: none; margin: 0; padding: 6px; max-height: 46vh; overflow: auto; }
+.pal-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--dim); padding: 8px 10px; border-radius: 9px;
+  font: 12.5px var(--disp); cursor: pointer; }
+.pal-item:hover { background: var(--panel); color: var(--fg); }
+.pal-item.active { background: var(--acc-soft); color: var(--fg); }
+.pal-ic { width: 20px; text-align: center; flex: none; }
 .pal-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pal-hint { font: 10px var(--mono); color: var(--dim-2); }
-.palette-foot {
-  display: flex; gap: 16px; padding: 9px 16px; border-top: 1px solid var(--line);
-  font: 10.5px var(--mono); color: var(--dim-2);
-}
-.palette-foot span { display: inline-flex; gap: 6px; align-items: center; }
+.pal-hint { font: 10px var(--mono); color: var(--dim-2); flex: none; }
+.palette-foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--line);
+  font: 10px var(--mono); color: var(--dim-2); }
 
-/* ------------------------------------------------------------------ boot */
-#boot {
-  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
-  background: var(--bg); transition: opacity .45s ease;
-}
-#boot.out { opacity: 0; pointer-events: none; }
-.boot-inner { display: grid; place-items: center; gap: 12px; }
-.boot-mark {
-  width: 62px; height: 62px; border-radius: 18px; display: grid; place-items: center;
-  background: linear-gradient(140deg, color-mix(in srgb, var(--acc1) 34%, transparent), color-mix(in srgb, var(--acc2) 24%, transparent));
-  border: 1px solid var(--line-2); box-shadow: var(--glow);
-  animation: pulse 2s ease-in-out infinite;
-}
-.boot-mark svg { width: 32px; height: 32px; }
-.boot-name { font: 700 15px var(--disp); letter-spacing: .3em; color: var(--fg); }
-.boot-sub { font: 500 9.5px var(--mono); letter-spacing: .22em; color: var(--dim-2); text-transform: uppercase; }
-.boot-bar { width: 190px; height: 2px; border-radius: 2px; overflow: hidden; background: var(--line); margin-top: 6px; }
-.boot-bar i { display: block; height: 100%; width: 40%; border-radius: 2px; background: var(--grad);
-              animation: bootslide 1.1s ease-in-out infinite; }
-@keyframes bootslide { from { transform: translateX(-110%); } to { transform: translateX(320%); } }
-
-/* ------------------------------------------------------------ responsive */
-#paneToggle, #closePane { display: none; }
-@media (max-width: 1100px) { :root { --agentw: 380px; } }
+/* responsive */
+.hide-sm { display: initial; }
+@media (max-width: 980px) { :root { --list-w: 220px; } }
 @media (max-width: 900px) {
-  .main { grid-template-columns: minmax(0, 1fr); }
-  .resizer { display: none; }
-  aside {
-    position: fixed; inset: 0; z-index: 30; border-left: 0;
-    background: color-mix(in srgb, var(--bg) 97%, transparent);
-    backdrop-filter: blur(18px); transform: translateX(100%);
-    transition: transform .24s cubic-bezier(.2,.7,.2,1);
-  }
-  body.agent-open aside { transform: none; }
-  #paneToggle, #closePane { display: inline-flex; }
-  .topbar { gap: 7px; padding: 0 10px; height: auto; min-height: 46px; flex-wrap: wrap; padding-block: 8px; }
-  .brand small, .brand .ver { display: none; }
-  #where { max-width: 14ch; }
-  .statusbar { padding: 0 10px; gap: 10px; }
-  #tabs { padding: 7px 10px; gap: 6px; }
-  .tab { max-width: 46vw; padding: 6px 8px 6px 10px; }
-  .tab em { max-width: 9ch; }
-  #screen { padding: 10px 6px 10px 10px; }
-  #log { padding: 12px 11px 8px; gap: 9px; }
-  .msg { padding: 10px 11px; border-radius: 12px; }
-  .msg .copy { opacity: 1; }              /* hover nai mobile e — always show */
-  .bfoot .hint, .cm-keys { display: none; }
-  .bbar { flex-wrap: wrap; }
-  .bbar input { min-width: 0; }
-  .bmeta .tagx { max-width: 30ch; }
-  #browserView { padding: 8px 10px 10px; }
-  .subbar { flex-wrap: wrap; }
-  /* topbar er shesh e agent pane er notun ekta quick action row */
-  .topbar .grow { display: none; }
-  .topbar { justify-content: flex-start; }
-  .topbar .pill, .topbar select, .topbar button { flex: 0 0 auto; }
-}
-@media (max-width: 620px) {
+  .list-col { position: fixed; left: var(--rail-w); top: 0; bottom: 0; z-index: 40;
+    background: var(--bg-2); transform: translateX(-105%); transition: transform .2s ease;
+    box-shadow: 20px 0 60px -30px rgba(0,0,0,.7); }
+  body.list-open .list-col { transform: translateX(0); }
+  body.list-open::after { content: ""; position: fixed; inset: 0; z-index: 35; background: rgba(0,0,0,.45); }
   .hide-sm { display: none !important; }
-  :root { --radius: 12px; }
-  .topbar { padding: 8px; gap: 6px; }
-  .mark { width: 26px; height: 26px; border-radius: 8px; }
-  .brand b { font-size: 11.5px; letter-spacing: .1em; }
-  .pill { padding: 4px 8px; font-size: 10px; }
-  button, select { padding: 7px 10px; font-size: 11.5px; border-radius: 9px; }
-  button.icon { padding: 7px 8px; }
-  .statusbar { height: 26px; font-size: 9.5px; gap: 8px; }
-  #input { min-height: 72px; }
-  .msg { font-size: 12px; }
-  details.step { font-size: 11px; }
-  .msg pre.codeblock { font-size: 10.5px; padding: 8px 10px; }
-  .empty .box, .bempty .box { padding: 20px 16px; margin: 0 10px; }
-  .drawer-body { padding: 16px 12px 40px; }
-  .drawer .tabs { padding: 8px 10px 0; }
-  .cards { grid-template-columns: 1fr; }
-  .think-status { font-size: 10.5px; }
-}
-/* tall-keyboard phones: composer sticks to the visible bottom */
-@media (max-width: 900px) and (display-mode: standalone) {
-  aside { padding-bottom: env(safe-area-inset-bottom, 0); }
+  #chatMessages { padding: 14px 10px 8px; }
+  .composer-wrap { padding: 8px 10px 12px; }
+  #paintingsView { padding: 10px; }
+  #settingsView { padding: 12px 10px 40px; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
-<div id="boot" aria-hidden="true">
-  <div class="boot-inner">
-    <div class="boot-mark">
-      <svg viewBox="0 0 32 32" fill="none">
-        <path d="M9 11l5 5-5 5" stroke="url(#bm)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-        <path d="M17 21h6" stroke="url(#bm)" stroke-width="3" stroke-linecap="round"/>
-        <defs>
-          <linearGradient id="bm" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0" stop-color="var(--acc1)"/>
-            <stop offset="1" stop-color="var(--acc2)"/>
-          </linearGradient>
-        </defs>
-      </svg>
-    </div>
-    <div class="boot-name">NOVAROUTER</div>
-    <div class="boot-sub">agent operations console</div>
-    <div class="boot-bar"><i></i></div>
-  </div>
-</div>
-
 <div id="app">
-  <!-- ========================================================== topbar -->
-  <header class="topbar">
-    <span class="brand">
-      <span class="mark" aria-hidden="true">
-        <svg viewBox="0 0 32 32" fill="none">
-          <path d="M9 11l5 5-5 5" stroke="url(#bm2)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M17 21h6" stroke="url(#bm2)" stroke-width="3" stroke-linecap="round"/>
-          <defs>
-            <linearGradient id="bm2" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="var(--acc1)"/>
-              <stop offset="1" stop-color="var(--acc2)"/>
-            </linearGradient>
-          </defs>
-        </svg>
-      </span>
-      <span class="name">
-        <b>NOVAROUTER</b>
-        <span class="ver">v2</span>
-      </span>
-      <small class="hide-sm">ROOT SHELL · AI AGENT</small>
-    </span>
 
-    <span class="pill" id="linkPill" title="connection to the terminal host">
-      <span class="dot pulse" id="dot"></span><span id="linkText">linking</span>
+  <!-- rail -->
+  <nav class="rail" aria-label="primary">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 32 32" fill="none">
+        <path d="M11 21l10-10M21 11h-7m7 0v7" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
     </span>
-    <span class="pill hide-sm" id="latencyPill" title="round-trip to /health">
-      <span id="latency">—</span>
-    </span>
-
+    <button type="button" class="rbtn active" data-view="chats" title="chats">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span class="tip">Chats · Ctrl+1</span>
+    </button>
+    <button type="button" class="rbtn" data-view="terminal" title="terminal">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-5-6-5M12 19h8"/></svg>
+      <span class="tip">Terminal · Ctrl+2</span>
+    </button>
+    <button type="button" class="rbtn" data-view="browser" title="browser">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/></svg>
+      <span class="tip">Live browser · Ctrl+3</span>
+    </button>
+    <button type="button" class="rbtn" data-view="paintings" title="paintings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+      <span class="tip">Paintings · Ctrl+4</span>
+    </button>
+    <button type="button" class="rbtn" data-view="settings" title="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span class="tip">Settings · Ctrl+5</span>
+    </button>
     <span class="grow"></span>
+    <button type="button" class="rbtn" id="extBtn" title="extensions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      <span class="badge" id="extCount" hidden>0</span>
+      <span class="tip">Extensions</span>
+    </button>
+    <button type="button" class="rbtn" id="credBtn" title="credentials">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+      <span class="badge" id="credCount" hidden>0</span>
+      <span class="tip">SSH &amp; accounts</span>
+    </button>
+    <button type="button" class="rbtn" id="paletteBtn" title="command palette">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <span class="tip">Command palette · Ctrl+K</span>
+    </button>
+  </nav>
 
-    <span class="pill" title="open shells / cap">
-      <span id="count">0/8</span><span class="hide-sm">&nbsp;shells</span>
-    </span>
-    <select id="theme" aria-label="console theme" title="theme">
-      <option value="obsidian">obsidian</option>
-      <option value="plasma">plasma</option>
-      <option value="matrix">matrix</option>
-      <option value="glacier">glacier</option>
-      <option value="ember">ember</option>
-    </select>
-    <button id="paletteBtn" type="button" class="icon kbd-btn hide-sm" title="command palette (Ctrl+K)"
-            aria-label="command palette">⌘ <kbd>K</kbd></button>
-    <button id="ext" type="button" class="icon" title="extensions — MCP, skills, plugins, database"
-            aria-label="extensions">⧉ <span id="extCount" class="hide-sm">0</span></button>
-    <button id="cred" type="button" class="icon" title="credentials — SSH keys, remote hosts, provider accounts"
-            aria-label="credentials">⚿ <span id="credCount" class="hide-sm">0</span></button>
-    <button id="new" type="button" class="primary">+ shell</button>
-    <button id="clear" type="button" class="icon" aria-label="clear the view" title="clear view (Alt+K)">clear</button>
-    <button id="paneToggle" type="button" class="icon" aria-label="toggle agent pane" title="agent pane">agent</button>
-  </header>
-
-  <!-- ======================================================= workspace -->
-  <div class="main">
-    <section class="pane">
-      <div class="subbar">
-        <div class="seg" role="tablist" aria-label="left pane view">
-          <button type="button" class="segbtn active" data-view="shell" role="tab" aria-selected="true">shell</button>
-          <button type="button" class="segbtn" data-view="browser" role="tab" aria-selected="false">
-            browser <span class="dot" id="bDot" aria-hidden="true"></span>
-          </button>
-        </div>
-        <span class="grow"></span>
-        <span class="pill" title="working directory of the focused shell" id="cwdPill">
-          <span style="color:var(--acc2)">cwd</span>
-          <span id="where" aria-live="polite">—</span>
-        </span>
-        <button id="rename" type="button" class="ghost hide-sm" title="rename the focused tab (Alt+R)">rename</button>
-        <button id="kill" type="button" class="ghost hide-sm" title="close the focused shell (Alt+W)">kill</button>
+  <!-- list column -->
+  <aside class="list-col" id="listCol">
+    <div class="list-head">
+      <b id="listTitle">Chats</b>
+      <span class="grow"></span>
+      <button type="button" class="iconbtn" id="listAction" title="new">＋</button>
+    </div>
+    <div id="searchBox"><input id="listSearch" placeholder="search…" aria-label="search list"></div>
+    <div id="listScroll"></div>
+    <div id="listFoot">
+      <div class="foot-status">
+        <span class="dot pulse" id="dot"></span><span id="linkText">linking</span>
+        <span class="grow" style="flex:1"></span>
+        <span id="latency">—</span>
       </div>
-      <div id="tabs" role="tablist" aria-label="terminal sessions"></div>
-      <div id="screen" aria-label="terminal output"></div>
+    </div>
+  </aside>
 
-      <!-- ================================================= live browser -->
-      <div id="browserView" hidden>
-        <div class="bbar">
-          <button id="bBack" type="button" class="icon" title="back" aria-label="back">←</button>
-          <button id="bReload" type="button" class="icon" title="reload" aria-label="reload">⟳</button>
-          <input id="bUrl" placeholder="example.com — then Enter" aria-label="address" spellcheck="false">
-          <button id="bGo" type="button" class="primary">go</button>
-          <button id="bStart" type="button" class="icon" title="launch Chromium" aria-label="start browser">⏻</button>
-          <button id="bStop" type="button" class="icon" title="close the browser" aria-label="stop browser">■</button>
-        </div>
-        <div class="bmeta">
-          <span class="tagx" id="bStatus">idle</span>
-          <span class="grow"></span>
-          <span class="tagx hide-sm" id="bTitle"></span>
-          <span class="tagx" id="bFps"></span>
-        </div>
-        <div class="bstage" id="bStage">
-          <div class="bempty" id="bEmpty">
-            <div class="box">
-              <h2>NO BROWSER YET</h2>
-              <p>A real Chromium the agent drives and you watch. Press <b>⏻</b>, or just
-                ask the agent to open something — it lands here.</p>
-              <button type="button" class="primary" id="bLaunch">launch browser</button>
-              <p class="hint" id="bHint"></p>
-            </div>
-          </div>
-          <img id="bFrame" alt="live browser view" tabindex="0" hidden>
-        </div>
-        <div class="bfoot">
-          <input id="bType" placeholder="type into the page, Enter to submit" aria-label="type into page">
-          <button id="bUp" type="button" class="icon" title="scroll up" aria-label="scroll up">↑</button>
-          <button id="bDown" type="button" class="icon" title="scroll down" aria-label="scroll down">↓</button>
-          <span class="hint hide-sm">click the page to click there · wheel to scroll</span>
-        </div>
-      </div>
+  <!-- content -->
+  <main class="content">
 
-      <!-- ==================================================== statusbar -->
-      <footer class="statusbar" aria-hidden="true">
-        <span class="sb-left" id="sbSession">—</span>
-        <span class="grow"></span>
-        <span class="sb-item hide-sm"><kbd>Ctrl</kbd><kbd>K</kbd> palette</span>
-        <span class="sb-item" id="sbProv">—</span>
-        <span class="sb-item" id="sbLat">—</span>
-      </footer>
-    </section>
-
-    <div class="resizer" id="resizer" aria-hidden="true"></div>
-
-    <aside aria-label="Agentbox">
-      <div class="subbar">
-        <span class="orb" id="adot" title="agent status"></span>
-        <b style="font:700 11px var(--disp); letter-spacing:.16em">AGENTBOX</b>
-        <span class="grow"></span>
-        <select id="provider" aria-label="agent provider" style="max-width:150px"></select>
-        <button id="manage" type="button" class="icon" title="manage providers" aria-label="manage providers">⚙</button>
-        <button id="closePane" type="button" class="icon" title="close">×</button>
-      </div>
-      <div id="log" aria-live="polite" aria-label="agent conversation"></div>
-      <div class="chips" id="chips" aria-label="suggested prompts"></div>
-      <div class="providers" id="providerBox" hidden>
-        <div class="list" id="provList"></div>
-        <div class="local-engines" id="localEngines"></div>
-        <form id="provForm" class="stack">
-          <input id="p_id" placeholder="id — groq, openrouter, local-vllm" aria-label="provider id" required>
-          <input id="p_url" placeholder="base url — https://api.groq.com/openai/v1" aria-label="base url" required>
-          <input id="p_model" placeholder="model — optional" aria-label="model">
-          <input id="p_key" type="password" placeholder="api key — blank keeps the stored one" aria-label="api key">
-          <button type="submit" class="primary">save provider</button>
-          <span class="hint" id="registry"></span>
-        </form>
-      </div>
-      <div class="hint" id="agentHint">Every command the agent runs appears in a shell tab you can watch.</div>
+    <!-- chats view -->
+    <section class="view" id="chatsView">
+      <div id="chatMessages" aria-live="polite"><div class="inner" id="chatInner"></div></div>
       <div class="composer-wrap">
         <form id="composer">
-          <textarea id="input" rows="1" aria-label="message to the agent"
-            placeholder="describe the task — the agent plans, runs commands and reports back…"></textarea>
-          <button type="submit" class="primary" title="send">↑</button>
+          <div class="att-preview" id="attPreview"></div>
+          <div class="row1">
+            <textarea id="input" rows="1" aria-label="message"
+              placeholder="describe the task — the agent plans, runs commands and reports back…"></textarea>
+          </div>
+          <div class="composer-tools">
+            <input type="file" id="attachFile" hidden>
+            <button type="button" class="attach-btn" id="attachBtn" title="attach an image or text file">📎 attach</button>
+            <select id="assistantPick" aria-label="assistant" title="assistant persona"></select>
+            <button type="button" class="iconbtn" id="editAssistant" title="edit assistants">✎</button>
+            <span class="grow"></span>
+            <select id="modelPick" aria-label="model" title="model"></select>
+            <select id="providerPick" aria-label="provider" title="provider" style="max-width:140px"></select>
+            <button type="submit" class="primary" id="sendBtn" title="send">↑</button>
+          </div>
+          <div class="composer-tools" style="gap:10px">
+            <span class="cm-keys" id="cmState">ready</span>
+            <span class="grow"></span>
+            <span class="cm-keys">↵ send · shift+↵ newline · <span id="cmChars">0</span> chars</span>
+          </div>
         </form>
-        <div class="composer-meta">
-          <span class="tagx" id="cmState">ready</span>
-          <span class="hint" id="cmHint">↵ send · shift+↵ newline</span>
-          <span class="tagx" id="cmChars">0</span>
+      </div>
+    </section>
+
+    <!-- terminal view -->
+    <section class="view" id="terminalView" hidden>
+      <div class="viewbar">
+        <b>TERMINAL</b>
+        <span class="pill hide-sm" id="cwdPill"><span style="color:var(--acc2)">cwd</span> <span id="where">—</span></span>
+        <span class="grow"></span>
+        <button type="button" class="ghost" id="rename">rename</button>
+        <button type="button" class="ghost" id="kill">kill</button>
+        <button type="button" class="primary" id="new">+ shell</button>
+      </div>
+      <div id="tabs" role="tablist" aria-label="terminal sessions"></div>
+      <div id="screen" aria-label="terminal output" tabindex="0"></div>
+    </section>
+
+    <!-- browser view -->
+    <section class="view" id="browserView" hidden>
+      <div class="viewbar">
+        <b>LIVE BROWSER</b>
+        <span class="grow"></span>
+        <span class="tagx" id="bStatus">idle</span>
+        <span class="tagx hide-sm" id="bTitle"></span>
+        <span class="tagx" id="bFps"></span>
+      </div>
+      <div class="bbar">
+        <button type="button" class="icon" id="bBack" title="back">←</button>
+        <button type="button" class="icon" id="bReload" title="reload">⟳</button>
+        <input id="bUrl" placeholder="example.com — then Enter" aria-label="address" spellcheck="false">
+        <button type="button" class="primary" id="bGo">go</button>
+        <button type="button" class="icon" id="bStart" title="launch Chromium">⏻</button>
+        <button type="button" class="icon" id="bStop" title="close">■</button>
+      </div>
+      <div class="bstage">
+        <div class="empty" id="bEmpty">
+          <div class="box">
+            <h2>NO BROWSER YET</h2>
+            <p>A real Chromium the agent drives and you watch. Press ⏻, or ask the agent to open something — it lands here.</p>
+            <button type="button" class="primary" id="bLaunch">launch browser</button>
+          </div>
+        </div>
+        <img id="bFrame" alt="live browser view" tabindex="0" hidden>
+      </div>
+      <div class="bfoot">
+        <input id="bType" placeholder="type into the page, Enter to submit" aria-label="type into page">
+        <button type="button" class="icon" id="bUp" title="scroll up">↑</button>
+        <button type="button" class="icon" id="bDown" title="scroll down">↓</button>
+        <span class="hint hide-sm">click the page to click there · wheel to scroll</span>
+      </div>
+    </section>
+
+    <!-- paintings view -->
+    <section class="view" id="paintingsView" hidden>
+      <div class="viewbar">
+        <b>PAINTINGS</b>
+        <span class="grow"></span>
+        <span class="tagx" id="paintProv">provider: —</span>
+      </div>
+      <div class="pbar">
+        <input id="paintPrompt" placeholder="describe the image — a neon koi pond at midnight, cinematic…">
+        <select id="paintSize" aria-label="size">
+          <option value="1024x1024">1024×1024</option>
+          <option value="768x768">768×768</option>
+          <option value="512x512">512×512</option>
+          <option value="1024x1792">1024×1792</option>
+          <option value="1792x1024">1792×1024</option>
+        </select>
+        <button type="button" class="primary" id="paintGo">generate</button>
+      </div>
+      <div id="paintingsStage">
+        <div class="pempty" id="paintEmpty">
+          <div class="box">
+            <h2>NO PAINTINGS YET</h2>
+            <p>Turn a prompt into images. Uses the active provider's image endpoint; files land in <b>paintings/</b> in the workspace.</p>
+          </div>
+        </div>
+        <div id="paintingsGrid"></div>
+      </div>
+    </section>
+
+    <!-- settings view -->
+    <section class="view" id="settingsView" hidden>
+      <div class="inner">
+        <div class="card">
+          <b>APPEARANCE</b>
+          <div class="row3">
+            <span>theme</span>
+            <select id="theme">
+              <option value="cherry">cherry (dark)</option>
+              <option value="cherry-light">cherry (light)</option>
+              <option value="obsidian">obsidian</option>
+              <option value="plasma">plasma</option>
+              <option value="matrix">matrix</option>
+              <option value="glacier">glacier</option>
+              <option value="ember">ember</option>
+            </select>
+            <span></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <b>PROVIDERS</b>
+          <p class="lead">Any OpenAI-compatible <code>/v1</code> endpoint. Keys are masked; a blank key field keeps the stored one.</p>
+          <div class="list" id="provList"></div>
+          <div id="localEngines" style="display:flex; flex-direction:column; gap:6px"></div>
+          <form id="provForm" class="card" style="padding:10px">
+            <div class="row2">
+              <input id="p_id" placeholder="id — groq, openrouter" aria-label="provider id" required>
+              <input id="p_url" placeholder="base url — https://api.groq.com/openai/v1" aria-label="base url" required>
+            </div>
+            <div class="row2">
+              <input id="p_model" placeholder="model — optional" aria-label="model">
+              <input id="p_key" type="password" placeholder="api key — blank keeps stored" aria-label="api key">
+            </div>
+            <button type="submit" class="primary">save provider</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <b>AGENT</b>
+          <p class="lead">Step budget per task, and how much history each turn carries.</p>
+          <div class="row2">
+            <label style="display:flex; flex-direction:column; gap:5px">
+              <span class="hint">steps per task</span>
+              <input id="setMaxSteps" type="number" min="1" max="30" placeholder="8">
+            </label>
+            <label style="display:flex; flex-direction:column; gap:5px">
+              <span class="hint">local history turns</span>
+              <input id="setHistory" type="number" min="0" max="50" placeholder="12">
+            </label>
+          </div>
+          <span class="hint">steps are baked at deploy (AGENT_LINUX_AGENTBOX_MAX_STEPS); history is saved locally.</span>
+        </div>
+
+        <div class="card">
+          <b>DATA</b>
+          <p class="lead">Topics, assistants and paintings metadata live in this browser's localStorage. Clear them here.</p>
+          <div class="row2">
+            <button type="button" id="wipeChats">clear all chats</button>
+            <button type="button" id="wipeAll">reset everything</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <b>ABOUT</b>
+          <p class="lead">Agent_Linux console · Cherry-style skin · zero dependencies. APIs: <code>/terminal/pty</code>, <code>/agent</code>, <code>/agent/extensions</code>, <code>/agent/browser</code>.</p>
         </div>
       </div>
-    </aside>
-  </div>
+    </section>
+  </main>
 </div>
 
-<div id="toasts" aria-live="polite" aria-atomic="false"></div>
+<div id="toasts" aria-live="polite"></div>
+<div id="lightbox" hidden><img id="lightboxImg" alt=""></div>
 
-<!-- ================================================== command palette -->
+<!-- command palette -->
 <div id="palette" class="palette-wrap" hidden role="dialog" aria-modal="true" aria-label="command palette">
   <div class="palette-backdrop" id="paletteBackdrop"></div>
   <div class="palette">
     <div class="palette-head">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-        <circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>
-      </svg>
-      <input id="paletteInput" placeholder="type a command — shells, browser, theme, providers…" spellcheck="false" aria-label="command search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="paletteInput" placeholder="type a command — views, shells, themes, providers…" spellcheck="false" aria-label="command search">
       <span class="pill">esc</span>
     </div>
     <ul id="paletteList" class="palette-list"></ul>
     <div class="palette-foot">
-      <span><kbd>↑↓</kbd> navigate</span>
-      <span><kbd>↵</kbd> run</span>
-      <span><kbd>esc</kbd> close</span>
+      <span><kbd>↑↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span>
     </div>
   </div>
 </div>
 
-<!-- ==================================================== extensions drawer -->
+<!-- extensions drawer -->
 <div id="extPanel" class="drawer" hidden aria-label="Agent extensions">
   <div class="drawer-head">
     <span class="pill"><span class="dot" id="extDot"></span><b>EXTENSIONS</b></span>
     <span class="grow"></span>
-    <span class="pill" id="storePill" title="where skills, MCP servers and plugins are kept">
-      <span id="storeText">store: —</span>
-    </span>
-    <button id="extClose" type="button" class="icon" aria-label="close extensions">×</button>
+    <span class="pill" id="storePill"><span id="storeText">store: —</span></span>
+    <button type="button" class="icon" id="extClose" aria-label="close">×</button>
   </div>
-
-  <nav class="tabs" id="extTabs" role="tablist" aria-label="extension sections">
-    <button type="button" class="exttab active" data-pane="mcp" role="tab" aria-selected="true">MCP servers</button>
-    <button type="button" class="exttab" data-pane="skills" role="tab" aria-selected="false">Skills</button>
-    <button type="button" class="exttab" data-pane="plugins" role="tab" aria-selected="false">Plugins</button>
-    <button type="button" class="exttab" data-pane="db" role="tab" aria-selected="false">Database</button>
-    <button type="button" class="exttab" data-pane="catalogue" role="tab" aria-selected="false">Examples</button>
+  <nav class="tabs" id="extTabs" role="tablist">
+    <button type="button" class="exttab active" data-pane="mcp">MCP servers</button>
+    <button type="button" class="exttab" data-pane="skills">Skills</button>
+    <button type="button" class="exttab" data-pane="plugins">Plugins</button>
+    <button type="button" class="exttab" data-pane="db">Database</button>
+    <button type="button" class="exttab" data-pane="catalogue">Examples</button>
   </nav>
-
   <div class="drawer-body">
-    <!-- ---------------------------------------------------------- MCP -->
-    <section class="extpane active" id="pane-mcp" role="tabpanel">
-      <p class="lead">Connect Model Context Protocol servers. Their tools join the agent's
-        toolbox automatically — namespaced <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>, so two
-        servers can both expose <code>search</code>.</p>
-      <div id="mcpList" class="cards"></div>
-      <form id="mcpForm" class="stack card">
+    <section class="extpane active" id="pane-mcp">
+      <p class="lead">Connect Model Context Protocol servers. Their tools join the agent's toolbox as <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>.</p>
+      <div id="mcpList" class="cards" style="margin:12px 0"></div>
+      <form id="mcpForm" class="card">
         <b>add a server</b>
         <div class="row2">
           <input id="m_id" placeholder="id — github" aria-label="server id" required>
@@ -1007,39 +742,29 @@ pre.out {
         </div>
         <input id="m_headers" placeholder='headers JSON — {"authorization":"Bearer ${env.TOKEN}"}' aria-label="headers">
         <input id="m_env" placeholder='env JSON — {"GITHUB_PERSONAL_ACCESS_TOKEN":"${env.GITHUB_TOKEN}"}' aria-label="environment">
-        <span class="hint">Use <code>${env.NAME}</code> in headers/env so secrets live in the
-          deployment, never in this form.</span>
         <button type="submit" class="primary">connect server</button>
       </form>
     </section>
-
-    <!-- ------------------------------------------------------- Skills -->
-    <section class="extpane" id="pane-skills" role="tabpanel">
-      <p class="lead">Upload instructions the agent loads on demand. A <code>.md</code> with
-        frontmatter is one skill; a <code>.zip</code> with a <code>SKILL.md</code> is a bundle,
-        and its other files ship with it.</p>
-      <div class="drop" id="skillDrop">
+    <section class="extpane" id="pane-skills">
+      <p class="lead">Instructions the agent loads on demand. A <code>.md</code> with frontmatter is one skill; a <code>.zip</code> with <code>SKILL.md</code> is a bundle.</p>
+      <div class="drop" id="skillDrop" style="margin:12px 0">
         <input type="file" id="skillFile" accept=".md,.zip,.markdown" hidden>
         <b>drop a .md or .zip here</b>
         <span class="hint">or click to choose — 10 MB max</span>
       </div>
-      <div id="skillList" class="cards"></div>
-      <form id="skillForm" class="stack card">
+      <div id="skillList" class="cards" style="margin:12px 0"></div>
+      <form id="skillForm" class="card">
         <b>or write one</b>
         <input id="s_name" placeholder="name — release-notes" aria-label="skill name" required>
-        <input id="s_desc" placeholder="description — one line the agent sees in its index" aria-label="description" required>
+        <input id="s_desc" placeholder="description — one line the agent sees" aria-label="description" required>
         <textarea id="s_body" rows="4" placeholder="instructions…" aria-label="instructions"></textarea>
         <button type="submit" class="primary">save skill</button>
       </form>
     </section>
-
-    <!-- ------------------------------------------------------ Plugins -->
-    <section class="extpane" id="pane-plugins" role="tabpanel">
-      <p class="lead">Declarative tools: a name, an argument schema and a URL. The host runs
-        <b>no third-party code</b> — templating <code>${arg}</code> and <code>${env.NAME}</code>
-        into the request is the whole mechanism.</p>
-      <div id="pluginList" class="cards"></div>
-      <form id="pluginForm" class="stack card">
+    <section class="extpane" id="pane-plugins">
+      <p class="lead">Declarative tools: a name, an argument schema and a URL. No third-party code runs on the host.</p>
+      <div id="pluginList" class="cards" style="margin:12px 0"></div>
+      <form id="pluginForm" class="card">
         <b>add a plugin</b>
         <input id="p_name" placeholder="name — notify-slack" aria-label="plugin name" required>
         <input id="p_desc" placeholder="description — Post a message to Slack" aria-label="plugin description" required>
@@ -1051,87 +776,57 @@ pre.out {
           <input id="p_props" placeholder='args JSON — {"text":{"type":"string"}}' aria-label="argument properties">
         </div>
         <input id="p_body" placeholder='body JSON — {"text":"${text}"}' aria-label="request body">
-        <span class="hint">A property listed here becomes a required tool argument unless you
-          leave the field blank.</span>
         <button type="submit" class="primary">add plugin</button>
       </form>
     </section>
-
-    <!-- ----------------------------------------------------- Database -->
-    <section class="extpane" id="pane-db" role="tabpanel">
-      <p class="lead">Skills, MCP servers and plugins are stored through one pluggable backend.
-        <b>file</b> needs nothing; <b>supabase</b> and <b>postgres</b> (Neon, Supabase, Railway)
-        make them survive a redeploy — and give the agent a real <code>sql</code> tool.</p>
-      <div id="dbCard" class="card"></div>
+    <section class="extpane" id="pane-db">
+      <p class="lead">Skills, MCP servers and plugins live through one pluggable backend: <b>file</b> needs nothing; <b>supabase</b>/<b>postgres</b> survive redeploys and give the agent a real <code>sql</code> tool.</p>
+      <div id="dbCard" class="card" style="margin:12px 0"></div>
       <div class="card">
         <b>run a statement</b>
         <textarea id="dbSql" rows="3" placeholder="select now();" aria-label="sql statement"></textarea>
         <button id="dbRun" type="button" class="primary">run</button>
         <pre id="dbOut" class="out" hidden></pre>
       </div>
-      <div class="card">
-        <b>point this host at a database</b>
-        <pre class="out">NOVA_STORE_BACKEND=supabase
-NOVA_STORE_URL=https://&lt;project&gt;.supabase.co
-NOVA_STORE_KEY=&lt;service_role key&gt;
-
-# or a DSN — Neon, Supabase, Railway, anything Postgres:
-NOVA_STORE_BACKEND=postgres
-NOVA_STORE_URL=postgresql://user:pass@host/db
-NOVA_STORE_READONLY=1        # optional: sql tool becomes SELECT-only</pre>
-        <span class="hint">The postgres backend needs <code>pip install asyncpg</code>; supabase
-          does not (it uses the REST API).</span>
-      </div>
     </section>
-
-    <!-- ---------------------------------------------------- Examples -->
-    <section class="extpane" id="pane-catalogue" role="tabpanel">
+    <section class="extpane" id="pane-catalogue">
       <p class="lead">Copy-paste starting points. Each button fills the matching form.</p>
-      <div id="catalogue" class="cards"></div>
+      <div id="catalogue" class="cards" style="margin:12px 0"></div>
     </section>
   </div>
 </div>
 
-<!-- =================================================== credentials drawer -->
+<!-- credentials drawer -->
 <div id="credPanel" class="drawer" hidden aria-label="SSH and accounts">
   <div class="drawer-head">
     <span class="pill"><span class="dot" id="credDot"></span><b>SSH &amp; ACCOUNTS</b></span>
     <span class="grow"></span>
-    <span class="pill" id="vaultPill" title="where credentials are encrypted and kept">
-      <span id="vaultText">vault: —</span>
-    </span>
-    <button id="credClose" type="button" class="icon" aria-label="close credentials">×</button>
+    <span class="pill"><span id="vaultText">vault: —</span></span>
+    <button type="button" class="icon" id="credClose" aria-label="close">×</button>
   </div>
-
-  <nav class="tabs" id="credTabs" role="tablist" aria-label="credential sections">
-    <button type="button" class="exttab active" data-pane="sshkeys" role="tab" aria-selected="true">SSH keys</button>
-    <button type="button" class="exttab" data-pane="sshhosts" role="tab" aria-selected="false">Remote hosts</button>
-    <button type="button" class="exttab" data-pane="knownhosts" role="tab" aria-selected="false">Known hosts</button>
-    <button type="button" class="exttab" data-pane="accounts" role="tab" aria-selected="false">Accounts</button>
+  <nav class="tabs" id="credTabs" role="tablist">
+    <button type="button" class="exttab active" data-pane="sshkeys">SSH keys</button>
+    <button type="button" class="exttab" data-pane="sshhosts">Remote hosts</button>
+    <button type="button" class="exttab" data-pane="knownhosts">Known hosts</button>
+    <button type="button" class="exttab" data-pane="accounts">Accounts</button>
   </nav>
-
   <div class="drawer-body">
-    <!-- ------------------------------------------------------- SSH keys -->
-    <section class="extpane active" id="pane-sshkeys" role="tabpanel">
-      <p class="lead">Keypairs this host can authenticate with. The private half is written
-        straight into the encrypted vault — no route ever returns it unless you press
-        <b>reveal</b> on purpose.</p>
-      <div id="sshStat" class="hint" style="padding:0 0 12px"></div>
-      <div id="keyList" class="cards"></div>
-      <form id="keyForm" class="stack card">
+    <section class="extpane active" id="pane-sshkeys">
+      <p class="lead">Keypairs this host can authenticate with. The private half lives in the encrypted vault; nothing returns it unless you press <b>reveal</b>.</p>
+      <div id="sshStat" class="hint" style="padding:12px 0"></div>
+      <div id="keyList" class="cards" style="margin:12px 0"></div>
+      <form id="keyForm" class="card">
         <b>generate a keypair</b>
         <div class="row2">
           <input id="k_name" placeholder="name — github-deploy" aria-label="key name" required>
           <select id="k_type" aria-label="key type">
-            <option value="ed25519">ed25519</option>
-            <option value="rsa">rsa</option>
-            <option value="ecdsa">ecdsa</option>
+            <option value="ed25519">ed25519</option><option value="rsa">rsa</option><option value="ecdsa">ecdsa</option>
           </select>
         </div>
         <input id="k_comment" placeholder="comment — you@laptop (optional)" aria-label="key comment">
         <button type="submit" class="primary">generate</button>
       </form>
-      <form id="keyImportForm" class="stack card">
+      <form id="keyImportForm" class="card" style="margin-top:10px">
         <b>or import an existing key</b>
         <input id="k_import_name" placeholder="name — work-laptop" aria-label="imported key name" required>
         <textarea id="k_import_private" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----…" aria-label="private key"></textarea>
@@ -1139,67 +834,51 @@ NOVA_STORE_READONLY=1        # optional: sql tool becomes SELECT-only</pre>
         <button type="submit" class="primary">import</button>
       </form>
     </section>
-
-    <!-- ---------------------------------------------------- Remote hosts -->
-    <section class="extpane" id="pane-sshhosts" role="tabpanel">
-      <p class="lead">Saved connections. <b>open</b> drops a real <code>ssh</code> tab into the
-        terminal — type in it like any other shell. <b>probe</b> only checks whether the
-        key or password actually authenticates.</p>
-      <div id="hostList" class="cards"></div>
-      <form id="hostForm" class="stack card">
+    <section class="extpane" id="pane-sshhosts">
+      <p class="lead">Saved connections. <b>open</b> drops a real ssh tab into the terminal; <b>probe</b> checks the credentials.</p>
+      <div id="hostList" class="cards" style="margin:12px 0"></div>
+      <form id="hostForm" class="card">
         <b>add or update a host</b>
         <div class="row2">
           <input id="h_name" placeholder="name — prod-box" aria-label="host name" required>
           <input id="h_label" placeholder="label — Production (optional)" aria-label="host label">
         </div>
         <div class="row2">
-          <input id="h_hostname" placeholder="hostname — 203.0.113.10 or box.example.com" aria-label="hostname" required>
+          <input id="h_hostname" placeholder="hostname — box.example.com" aria-label="hostname" required>
           <input id="h_user" placeholder="user — root" aria-label="ssh user" value="root">
         </div>
         <div class="row2">
           <input id="h_port" placeholder="port — 22" aria-label="port" value="22">
           <select id="h_auth" aria-label="auth method">
-            <option value="key">key</option>
-            <option value="password">password</option>
-            <option value="agent">ssh agent</option>
+            <option value="key">key</option><option value="password">password</option><option value="agent">ssh agent</option>
           </select>
         </div>
         <div class="row2">
           <select id="h_key" aria-label="key to use"><option value="">— key (none) —</option></select>
-          <input id="h_profile" placeholder="profile — optional (~/.ssh/config stanza)" aria-label="profile">
+          <input id="h_profile" placeholder="profile — optional" aria-label="profile">
         </div>
         <input id="h_password" type="password" placeholder="password — blank keeps the stored one" aria-label="password">
         <input id="h_notes" placeholder="notes — optional" aria-label="notes">
         <button type="submit" class="primary">save host</button>
       </form>
     </section>
-
-    <!-- ----------------------------------------------------- Known hosts -->
-    <section class="extpane" id="pane-knownhosts" role="tabpanel">
-      <p class="lead">The fingerprints this host has been told to trust. After a remote
-        rebuild the old entry is stale and every connection fails with a host-key
-        warning — forget it here, deliberately, instead of with
-        <code>-o StrictHostKeyChecking=no</code>.</p>
-      <div id="khPath" class="hint" style="padding:0 0 12px"></div>
-      <div id="khList" class="cards"></div>
+    <section class="extpane" id="pane-knownhosts">
+      <p class="lead">Trusted fingerprints. After a remote rebuild the stale entry fails every connection — forget it here, deliberately.</p>
+      <div id="khPath" class="hint" style="padding:12px 0"></div>
+      <div id="khList" class="cards" style="margin:12px 0"></div>
     </section>
-
-    <!-- -------------------------------------------------------- Accounts -->
-    <section class="extpane" id="pane-accounts" role="tabpanel">
-      <p class="lead">Named credentials per provider — a personal and a work Supabase, a
-        Neon branch per environment, several Cloudflare tokens. Activating a
-        <b>postgres</b>, <b>neon</b> or <b>supabase</b> account switches the database the
-        agent's <code>sql</code> tool talks to, immediately.</p>
-      <div id="acctList" class="cards"></div>
-      <form id="acctForm" class="stack card">
+    <section class="extpane" id="pane-accounts">
+      <p class="lead">Named credentials per provider. Activating a <b>postgres</b>/<b>neon</b>/<b>supabase</b> account switches the agent's <code>sql</code> database immediately.</p>
+      <div id="acctList" class="cards" style="margin:12px 0"></div>
+      <form id="acctForm" class="card">
         <b>add or update an account</b>
         <div class="row2">
           <select id="a_provider" aria-label="provider"></select>
-          <input id="a_name" placeholder="name — work, personal, staging" aria-label="account name" required>
+          <input id="a_name" placeholder="name — work, personal" aria-label="account name" required>
         </div>
         <input id="a_label" placeholder="label — optional" aria-label="account label">
-        <div id="aFields" class="stack"></div>
-        <label class="hint" style="padding:0; display:flex; align-items:center; gap:7px; cursor:pointer">
+        <div id="aFields" style="display:flex; flex-direction:column; gap:8px"></div>
+        <label class="hint" style="display:flex; align-items:center; gap:7px; cursor:pointer">
           <input id="a_active" type="checkbox"> make this the active account for its provider
         </label>
         <input id="a_notes" placeholder="notes — optional" aria-label="notes">
@@ -1209,9 +888,32 @@ NOVA_STORE_READONLY=1        # optional: sql tool becomes SELECT-only</pre>
   </div>
 </div>
 
+<!-- assistant editor modal -->
+<div id="asstPanel" class="drawer" hidden aria-label="Assistants">
+  <div class="drawer-head">
+    <span class="pill"><b>ASSISTANTS</b></span>
+    <span class="grow"></span>
+    <span class="pill">personas are sent as the system prompt</span>
+    <button type="button" class="icon" id="asstClose" aria-label="close">×</button>
+  </div>
+  <div class="drawer-body">
+    <div class="cards" id="asstList" style="margin-bottom:14px"></div>
+    <form id="asstForm" class="card">
+      <b>create / edit an assistant</b>
+      <div class="row2">
+        <input id="as_name" placeholder="name — shell-wizard" aria-label="assistant name" required>
+        <input id="as_emoji" placeholder="emoji — 🧙 (optional)" aria-label="emoji" maxlength="4">
+      </div>
+      <textarea id="as_prompt" rows="6" placeholder="system prompt — who this assistant is and how it works…" aria-label="system prompt"></textarea>
+      <div class="row2">
+        <button type="submit" class="primary">save assistant</button>
+        <button type="button" id="asstDelete">delete selected</button>
+      </div>
+      <span class="hint">Save the name you want to edit inside “name” — an existing name is updated.</span>
+    </form>
+  </div>
+</div>
+
 <script src="/static/console.js"></script>
-<script>
-  // Served from the same host as the page; no build step, no bundler.
-</script>
 </body>
 </html>
