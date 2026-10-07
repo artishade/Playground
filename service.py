@@ -48,6 +48,7 @@ from agent_linux.config import (
 )
 from agent_linux.extensions import router as extensions_router
 from agent_linux.browser_api import router as browser_router
+from agent_linux.agent_x_api import router as agent_x_router
 from agent_linux.credentials import router as credentials_router
 from agent_linux.env import describe as env_describe
 from agent_linux.store import describe as store_describe
@@ -236,6 +237,12 @@ app.include_router(browser_router, prefix="/agent/browser", tags=["browser"])
 # them too (an ssh_run tool, an account_env tool), not only the console.
 app.include_router(credentials_router, prefix="/agent", tags=["credentials"])
 
+# Agent X — the peer-agent mesh: talk to remote models, delegate to sub-agents,
+# self online-visit, self-improvement. Mounted under /agent because the main
+# agent drives it too; see agent_x.py for the engine, agent_x_api.py for the
+# HTTP contract the console and peers use.
+app.include_router(agent_x_router, prefix="/agent/x", tags=["agent-x"])
+
 # The config side-car — what a redeploy must not be able to take from you.
 # GET /agent/backup, POST /agent/backup/snapshot, POST /agent/backup/restore.
 app.include_router(vault_backup.router, prefix="/agent", tags=["backup"])
@@ -286,6 +293,20 @@ async def health():
         await SESSION.reap_if_idle()
     except Exception:                             # noqa: BLE001
         pass
+    # Agent X — peer-agent mesh status (never fails the health poll).
+    try:
+        from agent_linux.agent_x import get_agent_x as _ax_get
+        _ax = _ax_get()
+        _ax_peers = await _ax.mesh.peers()
+        agentx_report = {
+            "enabled": True,
+            "identity": _ax.mesh.identity.public(),
+            "bridges": len([p for p in _ax_peers if p.get("role") == "bridge"]),
+            "peers": len(_ax_peers),
+            "lessons": len(await _ax.mesh.mind(kind="lesson")),
+        }
+    except Exception as err:                      # noqa: BLE001
+        agentx_report = {"enabled": False, "error": f"{err.__class__.__name__}: {err}"}
     return JSONResponse({
         "ok": ok,
         "status": "healthy" if ok else "degraded",
@@ -300,6 +321,7 @@ async def health():
         "public_url": TERMINAL_PUBLIC_URL or None,
         "auth_required": bool(TERMINAL_SERVICE_TOKEN),
         "agentbox": agentbox_status(),
+        "agent_x": agentx_report,
         "store": store_describe(),
         "backup": {
             "key": vault_backup.SNAPSHOT_KEY,

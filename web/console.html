@@ -454,6 +454,22 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
     #settingsView { padding: 12px 10px 40px; }
   }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---- agent x ---- */
+.axlist { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.axlist:empty { display: none; }
+.axitem { display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+          border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2, transparent); }
+.axitem .axname { font-weight: 600; }
+.axitem .axmeta { color: var(--dim, #888); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.axdot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex: none; }
+.axdot.alive { background: #2fbf71; }
+.axdot.dead { background: #e5484d; }
+.axout { max-height: 260px; overflow: auto; font-size: 12px; white-space: pre-wrap;
+         border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; margin-top: 8px;
+         background: var(--panel-2, transparent); }
+.axbadge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+           border: 1px solid var(--line); color: var(--dim, #888); }
 </style>
 </head>
 <body>
@@ -481,6 +497,10 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
     <button type="button" class="rbtn" data-view="browser" title="browser">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.9 5.7 3.9 9s-1.4 6.4-3.9 9c-2.5-2.6-3.9-5.7-3.9-9S9.5 5.6 12 3z"/></svg>
       <span class="tip">Live browser · Ctrl+3</span>
+    </button>
+    <button type="button" class="rbtn" data-view="agentx" title="Agent X">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.8 2.8M16.2 16.2L19 19M19 5l-2.8 2.8M7.8 16.2L5 19"/></svg>
+      <span class="tip">Agent X · Ctrl+6</span>
     </button>
     <button type="button" class="rbtn" data-view="paintings" title="paintings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
@@ -635,6 +655,70 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
       </div>
     </section>
 
+    <!-- agent x view -->
+    <section class="view" id="agentxView" hidden>
+      <div class="inner">
+        <div class="card">
+          <b>AGENT X — PEER MESH</b>
+          <p class="lead" id="axIdentity">loading…</p>
+          <div class="row3">
+            <span id="axCounts">—</span>
+            <button type="button" class="btn" id="axRefresh">refresh</button>
+            <button type="button" class="btn" id="axSelfImprove">self-improve</button>
+          </div>
+        </div>
+        <div class="card">
+          <b>BRIDGES — TALK TO CLAUDE / GPT / GLM / KIMI / …</b>
+          <p class="lead">Any OpenAI-compatible <code>/v1</code> endpoint. The bridge speaks for Agent X; keys stay masked.</p>
+          <div class="row3">
+            <input id="axBridgeName" placeholder="name (e.g. Claude-via-NovaRouter)">
+            <input id="axBridgeURL" placeholder="https://…/v1">
+            <input id="axBridgeModel" placeholder="model id">
+          </div>
+          <div class="row3">
+            <input id="axBridgeKey" type="password" placeholder="api key (stored, never shown)">
+            <button type="button" class="btn" id="axBridgeAdd">add bridge</button>
+            <span></span>
+          </div>
+          <div id="axBridges" class="axlist"></div>
+        </div>
+        <div class="card">
+          <b>PEER AGENTS &amp; SUB-AGENTS</b>
+          <div class="row3">
+            <input id="axPeerName" placeholder="peer name">
+            <input id="axPeerURL" placeholder="http://host:3100 (agent_linux peer)">
+            <button type="button" class="btn" id="axPeerAdd">add peer</button>
+          </div>
+          <div id="axPeers" class="axlist"></div>
+        </div>
+        <div class="card">
+          <b>SELF ONLINE VISIT</b>
+          <div class="row3">
+            <input id="axVisitURL" placeholder="https://page-to-visit.com">
+            <input id="axVisitBrief" placeholder="research brief (optional)">
+            <button type="button" class="btn" id="axVisitGo">visit &amp; learn</button>
+          </div>
+          <pre id="axVisitOut" class="axout" hidden></pre>
+        </div>
+        <div class="card">
+          <b>TALK TO A BRIDGE</b>
+          <div class="row3">
+            <input id="axTalkMsg" placeholder="ask any bridged model…">
+            <button type="button" class="btn" id="axTalkGo">send</button>
+          </div>
+          <pre id="axTalkOut" class="axout" hidden></pre>
+        </div>
+        <div class="card">
+          <b>MIND — LESSONS &amp; TASKS</b>
+          <div class="row3">
+            <button type="button" class="btn" id="axMindLessons">lessons</button>
+            <button type="button" class="btn" id="axMindTasks">tasks</button>
+            <button type="button" class="btn" id="axInbox">inbox</button>
+          </div>
+          <pre id="axMindOut" class="axout" hidden></pre>
+        </div>
+      </div>
+    </section>
     <!-- settings view -->
     <section class="view" id="settingsView" hidden>
       <div class="inner">

@@ -1181,7 +1181,6 @@ async def _system_prompt(override: str = "") -> str:
         )
     try:
         from .browser_api import _available
-
         if _available():
             parts.append(
                 "A live Chromium browser is available and the user is watching it. "
@@ -1192,6 +1191,15 @@ async def _system_prompt(override: str = "") -> str:
                 "and browser_eval to extract structured data from the DOM."
             )
     except Exception:                             # noqa: BLE001
+        pass
+    # Agent X — the peer mesh, woven into the persona so the main agent can
+    # reach other agents and models without being asked twice.
+    try:
+        from .agent_x import get_agent_x as _ax_get
+        block = await _ax_get().prompt_block()
+        if block:
+            parts.append(block)
+    except Exception:                             # noqa: BLE001 — mesh down is not fatal
         pass
     return "\n\n".join(parts)
 

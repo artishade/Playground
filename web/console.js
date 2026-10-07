@@ -18,7 +18,7 @@
   const EXT = '/agent/extensions';
   const BROWSER = '/agent/browser';
   const CRED = '/agent';
-  const VIEWS = ['chats', 'terminal', 'browser', 'paintings', 'settings'];
+  const VIEWS = ['chats', 'terminal', 'browser', 'paintings', 'agentx', 'settings'];
   const THEMES = ['cherry', 'cherry-light', 'obsidian', 'plasma', 'matrix', 'glacier', 'ember'];
   const TERM_THEMES = {
     'cherry':       { background: '#0d0d12', foreground: '#cdd2e0', cursor: '#eb5757', selectionBackground: '#eb575740' },
@@ -233,7 +233,7 @@
   // ---- views -------------------------------------------------------------------------
 
   const LIST_TITLES = { chats: 'Chats', terminal: 'Shells', browser: 'Quick links',
-                        paintings: 'Paintings', settings: 'Settings' };
+                        paintings: 'Paintings', agentx: 'Agent X', settings: 'Settings' };
 
   function showView(name) {
     state.view = VIEWS.indexOf(name) >= 0 ? name : 'chats';
@@ -2508,8 +2508,8 @@
     });
     // keyboard
     on(global, 'keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && ['1', '2', '3', '4', '5'].indexOf(e.key) >= 0) {
-        const views = { 1: 'chats', 2: 'terminal', 3: 'browser', 4: 'paintings', 5: 'settings' };
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && ['1', '2', '3', '4', '5', '6'].indexOf(e.key) >= 0) {
+        const views = { 1: 'chats', 2: 'terminal', 3: 'browser', 4: 'paintings', 5: 'settings', 6: 'agentx' };
         e.preventDefault();
         showView(views[e.key]);
         return;
@@ -2565,7 +2565,151 @@
     setLink(null, 'linking');
     renderAssistantPick();
     renderAssistantEditor();
-    showView(store.get('agent_linux_view', 'chats'));
+    
+
+  // ---- agent x ---------------------------------------------------------------------------
+  const AX = '/agent/x';
+  function axOut(id, text) {
+    const el = $(id);
+    if (el) { el.hidden = false; el.textContent = typeof text === 'string' ? text : JSON.stringify(text, null, 2); }
+  }
+  function axDot(status) { return '<span class="axdot ' + (status || '') + '" title="' + (status || 'unknown') + '"></span>'; }
+
+  async function axStatus() {
+    const body = await api(AX + '/status');
+    if (!body || body.error) return;
+    const id = body.identity || {};
+    $('axIdentity').textContent = (id.name || 'Agent X') + ' — ' + (id.protocol || 'agentx/1.0');
+    const c = body.counts || {};
+    $('axCounts').innerHTML =
+      '<span class="axbadge">' + (c.bridges || 0) + ' bridges</span> ' +
+      '<span class="axbadge">' + (c.sub_agents || 0) + ' peers</span> ' +
+      '<span class="axbadge">' + (c.lessons || 0) + ' lessons</span> ' +
+      '<span class="axbadge">' + (c.tasks || 0) + ' tasks</span>';
+    const bridges = (body.peers || []).filter((p) => p.role === 'bridge');
+    const peers = (body.peers || []).filter((p) => p.role !== 'bridge');
+    $('axBridges').innerHTML = bridges.map((p) =>
+      '<div class="axitem">' + axDot(p.status) + '<span class="axname">' + escapeHtml(p.name) + '</span>' +
+      '<span class="axmeta">' + escapeHtml(p.model || 'default') + ' · ' + escapeHtml(p.base_url) + (p.key ? ' · ' + escapeHtml(p.key) : '') + '</span>' +
+      '<button class="btn axdel" data-pid="' + escapeHtml(p.pid) + '">remove</button></div>').join('');
+    $('axPeers').innerHTML = peers.map((p) =>
+      '<div class="axitem">' + axDot(p.status) + '<span class="axname">' + escapeHtml(p.name) + '</span>' +
+      '<span class="axmeta">' + escapeHtml(p.base_url) + ' · ' + escapeHtml(p.status) + '</span>' +
+      '<button class="btn axping" data-pid="' + escapeHtml(p.pid) + '">ping</button>' +
+      '<button class="btn axdel" data-pid="' + escapeHtml(p.pid) + '">remove</button></div>').join('');
+  }
+
+  async function axVisit() {
+    const url = $('axVisitURL').value.trim();
+    if (!url) { toast('a URL is needed', 'err'); return; }
+    const btn = $('axVisitGo'); btn.disabled = true; btn.textContent = 'visiting…';
+    axOut('axVisitOut', 'visiting ' + url + ' …');
+    const body = await api(AX + '/visit', { method: 'POST', body: JSON.stringify({ url: url, brief: $('axVisitBrief').value.trim() }) });
+    btn.disabled = false; btn.textContent = 'visit & learn';
+    if (!body || body.error) { axOut('axVisitOut', 'visit failed: ' + ((body && body.error) || 'unknown')); return; }
+    let text = 'URL: ' + (body.url || '') + '\nTITLE: ' + (body.title || '') + '  (via ' + (body.via || '?') + ')\n\n' +
+               'SUMMARY:\n' + (body.summary || '(none)');
+    if ((body.key_facts || []).length) text += '\n\nKEY FACTS:\n- ' + body.key_facts.join('\n- ');
+    if (body.lesson_saved) text += '\n\n[ok] lesson saved to the mind';
+    if ((body.peers_registered || []).length) text += '\n[ok] registered peers: ' + body.peers_registered.join(', ');
+    axOut('axVisitOut', text);
+    axStatus();
+  }
+
+  async function axTalk() {
+    const message = $('axTalkMsg').value.trim();
+    if (!message) { toast('type something first', 'err'); return; }
+    const btn = $('axTalkGo'); btn.disabled = true; btn.textContent = '…';
+    axOut('axTalkOut', 'thinking…');
+    const body = await api(AX + '/talk', { method: 'POST', body: JSON.stringify({ message: message }) });
+    btn.disabled = false; btn.textContent = 'send';
+    if (!body || body.error) { axOut('axTalkOut', 'talk failed: ' + ((body && body.error) || 'unknown')); return; }
+    axOut('axTalkOut', '[' + (body.peer || 'bridge') + ' / ' + (body.model || '?') + ']\n\n' + (body.reply || '(empty)'));
+  }
+
+  async function axSelfImprove() {
+    const btn = $('axSelfImprove'); btn.disabled = true; btn.textContent = 'reflecting…';
+    const body = await api(AX + '/self_improve', { method: 'POST', body: JSON.stringify({}) });
+    btn.disabled = false; btn.textContent = 'self-improve';
+    if (!body || body.error) { axOut('axMindOut', 'self-improve: ' + ((body && body.error) || 'unknown')); return; }
+    let text = 'PLAN:\n' + (body.plan || '(none)') + '\n\nNEW LESSONS (' + (body.lessons_saved || 0) + '):';
+    (body.lessons || []).forEach((l) => { text += '\n- ' + (l.text || ''); });
+    axOut('axMindOut', text);
+    axStatus();
+  }
+
+  async function axMind(kind) {
+    const body = await api(AX + '/mind?kind=' + kind);
+    if (!body || body.error) { axOut('axMindOut', 'failed: ' + ((body && body.error) || 'unknown')); return; }
+    const items = body.items || [];
+    if (!items.length) { axOut('axMindOut', '(empty — go visit, talk, delegate)'); return; }
+    axOut('axMindOut', items.map((i) => {
+      if (kind === 'lesson') return '- ' + (i.text || '');
+      if (kind === 'task') return '[' + (i.status || '?') + '] ' + (i.title || '') + ' — ' + (i.result || i.goal || '');
+      return (i.role || '?') + ': ' + (i.content || '').slice(0, 160);
+    }).join('\n'));
+  }
+
+  async function axInbox() {
+    const body = await api(AX + '/inbox');
+    if (!body || body.error) { axOut('axMindOut', 'failed'); return; }
+    const items = body.inbox || [];
+    if (!items.length) { axOut('axMindOut', '(inbox empty)'); return; }
+    axOut('axMindOut', items.map((i) =>
+      '[' + (i.kind || '?') + ' from ' + (i.pid || '?') + '] ' + JSON.stringify(i.payload || {}).slice(0, 200)
+    ).join('\n'));
+    await api(AX + '/inbox/read', { method: 'POST', body: JSON.stringify({}) });
+  }
+
+  document.addEventListener('click', async (ev) => {
+    const t = ev.target.closest ? ev.target.closest('button') : null;
+    if (!t) return;
+    if (t.id === 'axRefresh') axStatus();
+    else if (t.id === 'axSelfImprove') axSelfImprove();
+    else if (t.id === 'axBridgeAdd') {
+      const payload = { role: 'bridge', name: $('axBridgeName').value.trim() || 'bridge',
+                        base_url: $('axBridgeURL').value.trim(), model: $('axBridgeModel').value.trim(),
+                        api_key: $('axBridgeKey').value };
+      if (!payload.base_url) { toast('bridge URL is required', 'err'); return; }
+      const body = await api(AX + '/peers', { method: 'POST', body: JSON.stringify(payload) });
+      if (body && body.ok) { toast('bridge added', 'ok'); $('axBridgeKey').value = ''; axStatus(); }
+      else toast((body && body.error) || 'could not add bridge', 'err');
+    }
+    else if (t.id === 'axPeerAdd') {
+      const payload = { role: 'peer', name: $('axPeerName').value.trim() || 'peer',
+                        base_url: $('axPeerURL').value.trim() };
+      if (!payload.base_url) { toast('peer URL is required', 'err'); return; }
+      const body = await api(AX + '/peers', { method: 'POST', body: JSON.stringify(payload) });
+      if (body && body.ok) { toast('peer added', 'ok'); axStatus(); }
+      else toast((body && body.error) || 'could not add peer', 'err');
+    }
+    else if (t.id === 'axVisitGo') axVisit();
+    else if (t.id === 'axTalkGo') axTalk();
+    else if (t.id === 'axMindLessons') axMind('lesson');
+    else if (t.id === 'axMindTasks') axMind('task');
+    else if (t.id === 'axInbox') axInbox();
+    else if (t.classList.contains('axdel')) {
+      const body = await api(AX + '/peers/' + t.dataset.pid, { method: 'DELETE' });
+      if (body && body.ok) { toast('removed', 'ok'); axStatus(); } else toast('remove failed', 'err');
+    }
+    else if (t.classList.contains('axping')) {
+      t.disabled = true; t.textContent = '…';
+      const body = await api(AX + '/peers/' + t.dataset.pid + '/ping', { method: 'POST' });
+      t.disabled = false; t.textContent = 'ping';
+      const alive = body && body.status === 'alive';
+      toast(alive ? 'peer alive' : 'peer dead: ' + ((body && body.error) || '?'), alive ? 'ok' : 'err');
+      axStatus();
+    }
+  });
+
+  // refresh the panel when the view opens
+  const _axShowView = showView;
+  showView = function (name) {
+    _axShowView(name);
+    if (name === 'agentx') axStatus();
+  };
+
+  showView(store.get('agent_linux_view', 'chats'));
     try {
       await loadSessions();
       if (!state.sessions.some((s) => !s.closed)) await newSession();
