@@ -77,7 +77,10 @@ body { margin: 0; background: var(--bg); color: var(--fg); overflow: hidden;
 /* rail */
 .rail { width: var(--rail-w); flex: none; display: flex; flex-direction: column; align-items: center;
   gap: 6px; padding: 10px 0 8px; border-right: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-2) 88%, transparent); }
+  background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+  /* above the mobile drawer backdrop (35) and drawer (40): the icons stay
+     tappable even when the list column is open as an overlay */
+  position: relative; z-index: 45; }
 .rail .logo { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; margin-bottom: 8px;
   background: linear-gradient(140deg, var(--acc), color-mix(in srgb, var(--acc) 55%, #fff));
   box-shadow: 0 6px 18px -8px color-mix(in srgb, var(--acc) 90%, transparent); }
@@ -429,20 +432,23 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
   font: 10px var(--mono); color: var(--dim-2); }
 
 /* responsive */
-.hide-sm { display: initial; }
-@media (max-width: 980px) { :root { --list-w: 220px; } }
-@media (max-width: 900px) {
-  .list-col { position: fixed; left: var(--rail-w); top: 0; bottom: 0; z-index: 40;
-    background: var(--bg-2); transform: translateX(-105%); transition: transform .2s ease;
-    box-shadow: 20px 0 60px -30px rgba(0,0,0,.7); }
-  body.list-open .list-col { transform: translateX(0); }
-  body.list-open::after { content: ""; position: fixed; inset: 0; z-index: 35; background: rgba(0,0,0,.45); }
-  .hide-sm { display: none !important; }
-  #chatMessages { padding: 14px 10px 8px; }
-  .composer-wrap { padding: 8px 10px 12px; }
-  #paintingsView { padding: 10px; }
-  #settingsView { padding: 12px 10px 40px; }
-}
+  .hide-sm { display: initial; }
+  @media (max-width: 980px) { :root { --list-w: 220px; } }
+  @media (max-width: 900px) {
+    /* the list column becomes a drawer that slides over the content; the
+       rail stays visible and above it, so its icons remain tappable */
+    .list-col { position: fixed; left: var(--rail-w); top: 0; bottom: 0; z-index: 40;
+      background: var(--bg-2); transform: translateX(-105%); transition: transform .2s ease;
+      box-shadow: 20px 0 60px -30px rgba(0,0,0,.7); }
+    body.side-collapsed .list-col { display: flex; transform: translateX(-105%); }
+    body.list-open .list-col { transform: translateX(0); }
+    body.list-open::after { content: ""; position: fixed; inset: 0; z-index: 35; background: rgba(0,0,0,.45); }
+    .hide-sm { display: none !important; }
+    #chatMessages { padding: 14px 10px 8px; }
+    .composer-wrap { padding: 8px 10px 12px; }
+    #paintingsView { padding: 10px; }
+    #settingsView { padding: 12px 10px 40px; }
+  }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>

@@ -189,17 +189,35 @@
 
   // ---- sidebar toggle -------------------------------------------------------------------
 
+  /** True when the list column renders as a slide-over drawer. */
+  function isNarrow() { return global.innerWidth <= 900; }
+
   function applySidebar(open) {
+    // Desktop: open shows the column, collapsed hides it. Mobile: the column
+    // is always a drawer — `open` only decides whether it is slid in or out,
+    // so a phone never loses the drawer behind a collapsed state.
     document.body.classList.toggle('side-collapsed', !open);
-    document.body.classList.toggle('list-open', open && global.innerWidth <= 900);
+    if (isNarrow()) document.body.classList.add('list-open');
     const t = $('sideToggle');
     if (t) t.setAttribute('aria-pressed', String(open));
     store.set('agent_linux_sidebar', open ? 'open' : 'collapsed');
   }
   function sidebarOpen() {
+    // The drawer itself is present either way; `open` says whether the list
+    // column is (or would be) expanded.
     return !document.body.classList.contains('side-collapsed');
   }
   function toggleSidebar() {
+    if (isNarrow()) {
+      // On a phone the drawer slides out over a dimmed backdrop; the rail
+      // stays above it so the toggle and the other icons remain tappable.
+      const open = document.body.classList.contains('list-open');
+      document.body.classList.toggle('list-open', !open);
+      store.set('agent_linux_sidebar', !open ? 'open' : 'collapsed');
+      const t = $('sideToggle');
+      if (t) t.setAttribute('aria-pressed', String(!open));
+      return;
+    }
     applySidebar(!sidebarOpen());
   }
 
@@ -2287,10 +2305,10 @@
     document.querySelectorAll('.rbtn[data-view]').forEach((node) => {
       on(node, 'click', () => {
         showView(node.dataset.view);
-        if (global.innerWidth <= 900) {
-          // a view was picked on a phone: bring the list back if it was folded
-          if (!sidebarOpen()) applySidebar(true);
-          else if (node.dataset.view === 'chats') document.body.classList.add('list-open');
+        if (isNarrow()) {
+          // on a phone the view list rides the drawer — slide it in when a
+          // view is picked; the toggle button closes it again
+          document.body.classList.add('list-open');
         }
       });
     });
@@ -2300,7 +2318,18 @@
       else if (state.view === 'terminal') { showView('terminal'); newSession(); }
       else if (state.view === 'paintings') { const input = $('paintPrompt'); if (input) input.focus(); }
     });
+    // list item click closes the drawer on a phone
+    on($('listScroll'), 'click', (e) => {
+      if (isNarrow() && e.target.closest('.litem')) document.body.classList.remove('list-open');
+    });
     on($('listSearch'), 'input', () => renderList());
+    // tapping the dimmed content behind the drawer closes it
+    on($('app'), 'click', (e) => {
+      if (!isNarrow() || !document.body.classList.contains('list-open')) return;
+      const t = e.target;
+      if (t.closest('.list-col') || t.closest('.rail')) return;
+      document.body.classList.remove('list-open');
+    });
     // composer
     on($('composer'), 'submit', (e) => {
       e.preventDefault();
@@ -2480,6 +2509,10 @@
         if (palette.open) { paletteClose(); return; }
         const lb = $('lightbox');
         if (lb && !lb.hidden) { closeLightbox(); return; }
+        if (isNarrow() && document.body.classList.contains('list-open')) {
+          document.body.classList.remove('list-open');
+          return;
+        }
         ['extPanel', 'credPanel', 'asstPanel'].forEach((id) => { const p = $(id); if (p) p.hidden = true; });
         return;
       }
@@ -2492,7 +2525,13 @@
       else if (key === 'r') { e.preventDefault(); renameActive(); }
       else if (key === 'w') { e.preventDefault(); if (state.active) closeSession(state.active); }
     });
-    on(global, 'resize', () => { screen.fit(); postResize(); });
+    on(global, 'resize', () => {
+      screen.fit();
+      postResize();
+      // crossing the drawer breakpoint: re-seat the sidebar so a desktop
+      // "collapsed" never leaves the phone drawer stuck open (or vice versa)
+      applySidebar(isNarrow() ? true : store.get('agent_linux_sidebar', 'open') !== 'collapsed');
+    });
     wireSettings();
   }
 
@@ -2508,7 +2547,9 @@
     loadPaintings();
     state.historyTurns = Math.max(0, Math.min(50, parseInt(store.get('agent_linux_history', '12'), 10) || 12));
     applyTheme(store.get('agent_linux_theme', 'cherry'));
-    applySidebar(store.get('agent_linux_sidebar', 'open') !== 'collapsed');
+    // On a phone the list column is a drawer; keep it slid out at boot so the
+    // app never opens looking frozen behind a drawer state.
+    applySidebar(isNarrow() ? true : store.get('agent_linux_sidebar', 'open') !== 'collapsed');
     wire();
     buildTerminal();
     setLink(null, 'linking');
