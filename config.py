@@ -133,6 +133,11 @@ AGENTBOX_MAX_STEPS = max(0, env.int_or("AGENTBOX_MAX_STEPS", 0))
 # 0 = no per-call timeout: a build, a training run or a download may take as
 # long as it takes. Set a positive number to reintroduce a ceiling.
 AGENTBOX_STEP_TIMEOUT = env.int_or("AGENTBOX_STEP_TIMEOUT", 0)
+# Auto-fallback: when the chosen provider fails, walk a ranked chain of the
+# others instead of dying. 1 = on (the default), 0 = single-provider stubbornness.
+AGENTBOX_AUTO_FALLBACK = env.flag("AGENTBOX_AUTO_FALLBACK", True)
+# How long a failed provider sits out before it is tried again (seconds).
+AGENTBOX_FALLBACK_COOLDOWN = max(1, env.int_or("AGENTBOX_FALLBACK_COOLDOWN", 120))
 # Where the saved custom providers live. Empty = <workspace>/.agentbox-providers.json
 AGENTBOX_PROVIDER_FILE = env.get("AGENTBOX_PROVIDER_FILE")
 

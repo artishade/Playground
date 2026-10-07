@@ -753,6 +753,10 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
               <input id="p_model" placeholder="model — optional" aria-label="model">
               <input id="p_key" type="password" placeholder="api key — blank keeps stored" aria-label="api key">
             </div>
+            <div class="row2">
+              <input id="p_rank" type="number" min="0" value="0" placeholder="rank" aria-label="fallback rank" title="0 = tried first. Higher = later in the auto-fallback chain.">
+              <span class="hint" style="align-self:center">rank 0 = first choice · higher = fallback order</span>
+            </div>
             <button type="submit" class="primary">save provider</button>
           </form>
         </div>

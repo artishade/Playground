@@ -40,12 +40,15 @@ import math
 import re
 import socket
 import threading
-from dataclasses import dataclass
-from typing import Any
+import time
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import config
 from . import mcp as mcp_client
@@ -765,6 +768,7 @@ class Provider:
     model: str = ""
     label: str = ""
     source: str = "saved"      # `env` | `saved` — where it came from
+    rank: int = 0              # 0 = best; higher = later in the fallback chain
 
     def public(self) -> dict:
         """Never the raw key: a saved key is a credential, not a field."""
@@ -776,6 +780,7 @@ class Provider:
             "source": self.source,
             "api_key": mask_key(self.api_key),
             "has_key": bool(self.api_key),
+            "rank": self.rank,
         }
 
 
@@ -996,7 +1001,8 @@ def load_providers() -> dict[str, Provider]:
                               api_key=str(entry.get("api_key") or ""),
                               model=str(entry.get("model") or ""),
                               label=str(entry.get("label") or "")[:40],
-                              source="env" if pid == ENV_PROVIDER_ID else "saved")
+                              source="env" if pid == ENV_PROVIDER_ID else "saved",
+                              rank=max(0, int(entry.get("rank") or 0)))
     return found
 
 
@@ -1007,7 +1013,7 @@ def save_providers(providers: list[Provider]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = [
             {"id": p.id, "label": p.label, "base_url": p.base_url,
-             "api_key": p.api_key, "model": p.model}
+             "api_key": p.api_key, "model": p.model, "rank": max(0, int(p.rank or 0))}
             for p in providers if p.source != "env"
         ]
         # 0600: this file holds credentials, and the terminal runs as root.
@@ -1019,7 +1025,7 @@ def save_providers(providers: list[Provider]) -> None:
 
 
 def upsert_provider(*, id: str, base_url: str, api_key: str = "",
-                    model: str = "", label: str = "") -> Provider:
+                    model: str = "", label: str = "", rank: int = 0) -> Provider:
     """Add or update one custom provider, keeping every other one as it was."""
     pid = (id or "").strip().lower()
     if not ID_RE.match(pid):
@@ -1029,6 +1035,7 @@ def upsert_provider(*, id: str, base_url: str, api_key: str = "",
         raise ValueError("base_url must start with http:// or https://")
     clean_model = (model or "").strip()[:120]
     clean_label = (label or "").strip()[:40]
+    clean_rank = max(0, int(rank or 0))
 
     existing = load_providers()
     previous = existing.get(pid)
@@ -1036,7 +1043,7 @@ def upsert_provider(*, id: str, base_url: str, api_key: str = "",
     # provider from the page does not have to re-type its credential.
     key = (api_key or "").strip() or (previous.api_key if previous else "")
     provider = Provider(id=pid, base_url=base, api_key=key, model=clean_model,
-                        label=clean_label,
+                        label=clean_label, rank=clean_rank,
                         source="env" if pid == ENV_PROVIDER_ID else "saved")
     keep = [p for p in existing.values() if p.id != pid]
     save_providers([*keep, provider])
@@ -1072,6 +1079,125 @@ def resolve_provider(pid: str | None) -> Provider | None:
 
 
 # --------------------------------------------------------------------------- #
+# Auto-fallback — a ranked provider chain with cooldowns
+# --------------------------------------------------------------------------- #
+
+_FALLBACK_LOCK = threading.Lock()
+_FALLBACK_COOLDOWN: dict[str, float] = {}   # provider id → unix ts when it may retry
+
+
+def _fallback_available() -> bool:
+    return bool(config.AGENTBOX_AUTO_FALLBACK)
+
+
+def mark_provider_failed(pid: str) -> None:
+    """Put a provider on cooldown after a failure."""
+    with _FALLBACK_LOCK:
+        _FALLBACK_COOLDOWN[pid] = time.time() + config.AGENTBOX_FALLBACK_COOLDOWN
+
+
+def mark_provider_ok(pid: str) -> None:
+    """A success clears any cooldown."""
+    with _FALLBACK_LOCK:
+        _FALLBACK_COOLDOWN.pop(pid, None)
+
+
+def provider_cooldowns() -> dict[str, float]:
+    with _FALLBACK_LOCK:
+        now = time.time()
+        return {pid: round(remaining, 1) for pid, until in _FALLBACK_COOLDOWN.items()
+                if (remaining := until - now) > 0}
+
+
+def _fallback_chain(preferred: Provider) -> list[Provider]:
+    """The ranked attempt order: the preferred provider first, then every
+    other one by rank (0 = best). Cooldowns do NOT exclude — they only decide
+    order later in the chain — so a single-provider setup still works."""
+    others = [p for p in load_providers().values() if p.id != preferred.id]
+    others.sort(key=lambda p: (p.rank, p.id))
+    return [preferred, *others]
+
+
+def _ordered_chain(preferred: Provider) -> list[Provider]:
+    """Chain with cooled-down providers pushed to the back (still tried)."""
+    chain = _fallback_chain(preferred)
+    now = time.time()
+    with _FALLBACK_LOCK:
+        hot = [p for p in chain if _FALLBACK_COOLDOWN.get(p.id, 0) <= now]
+        cold = [p for p in chain if _FALLBACK_COOLDOWN.get(p.id, 0) > now]
+    return hot + cold
+
+
+def _classify_failure(err: Exception) -> str:
+    """One word for what went wrong — drives the cooldown decision."""
+    if isinstance(err, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(err, httpx.HTTPStatusError):
+        code = err.response.status_code if err.response is not None else 0
+        if code in (401, 403):
+            return "auth"
+        if code == 429:
+            return "rate_limited"
+        if code >= 500:
+            return "server"
+        return "http"
+    if isinstance(err, httpx.HTTPError):
+        return "unreachable"
+    if isinstance(err, RuntimeError):
+        text = str(err).lower()
+        if "http 401" in text or "http 403" in text:
+            return "auth"
+        if "http 429" in text:
+            return "rate_limited"
+        if "http 5" in text:
+            return "server"
+        return "runtime"
+    return "unknown"
+
+
+def _failure_is_fatal(kind: str) -> bool:
+    """Auth errors mean the key is wrong — switching providers is right.
+    Rate limits and timeouts mean this key is tired — switching is right too."""
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Live step stream — one async event queue per running chat
+# --------------------------------------------------------------------------- #
+
+_LIVE_LOCK = threading.Lock()
+_LIVE_QUEUES: dict[str, list[asyncio.Queue]] = {}
+
+
+def live_subscribe(task_id: str) -> asyncio.Queue:
+    q: asyncio.Queue = asyncio.Queue()
+    with _LIVE_LOCK:
+        _LIVE_QUEUES.setdefault(task_id, []).append(q)
+    return q
+
+
+def live_unsubscribe(task_id: str, q: asyncio.Queue) -> None:
+    with _LIVE_LOCK:
+        watchers = _LIVE_QUEUES.get(task_id)
+        if watchers and q in watchers:
+            watchers.remove(q)
+        if watchers is not None and not watchers:
+            _LIVE_QUEUES.pop(task_id, None)
+
+
+def live_emit(task_id: str, event: dict[str, Any]) -> None:
+    """Fan an event out to every SSE watcher of this task. Never blocks,
+    never raises — a dead watcher must not kill the agent loop."""
+    with _LIVE_LOCK:
+        watchers = list(_LIVE_QUEUES.get(task_id, ()))
+    for q in watchers:
+        try:
+            q.put_nowait(event)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
 # The model
 # --------------------------------------------------------------------------- #
 
@@ -1097,6 +1223,8 @@ def agentbox_status() -> dict:
         "endpoint": active.base_url if active else None,
         "max_steps": config.AGENTBOX_MAX_STEPS,
         "privacy_mode": bool(config.AGENTBOX_PRIVACY_MODE),
+        "auto_fallback": bool(config.AGENTBOX_AUTO_FALLBACK),
+        "fallback_cooldowns": provider_cooldowns(),
         "local_only": all(is_local_endpoint(p.base_url) for p in providers.values()) if providers else None,
         "system_prompt": "custom" if (config.AGENTBOX_SYSTEM_PROMPT or (config.build_root() / ".agentbox-system-prompt").is_file()) else "default",
     }
@@ -1327,19 +1455,54 @@ async def _body(request: Request) -> dict:
 
 @router.post("/chat")
 async def chat(request: Request):
-    """One turn (or a whole short task) of agent, with its steps visible."""
+    """One turn (or a whole short task) of agent, with its steps visible.
+
+    Collects the live event stream into one JSON response — the classic mode.
+    For real-time steps, use /chat/stream (SSE) instead.
+    """
     if (missing := agentbox_configured_response()) is not None:
         return missing
     body = await _body(request)
+    events: list[dict[str, Any]] = []
+    result: dict[str, Any] = {}
+    async for event in _agent_run(body):
+        kind = event.get("type")
+        if kind == "done":
+            result = event
+        elif kind == "error":
+            return JSONResponse(
+                {"error": event.get("error") or "the agent failed.",
+                 "code": event.get("code") or "agentbox_error",
+                 "steps": [e.get("step") for e in events if e.get("type") == "step"]},
+                status_code=event.get("status") or 502)
+        elif kind == "step":
+            events.append(event)
+    steps = [e.get("step") for e in events if e.get("type") == "step"]
+    return {"ok": True, "model": result.get("model"), "provider": result.get("provider"),
+            "reply": result.get("reply", ""), "steps": steps,
+            "fallbacks": result.get("fallbacks", []), "extensions": result.get("extensions", [])}
+
+
+async def _agent_run(body: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    """The whole agent turn as an event stream.
+
+    Yields: start, step, fallback, notice and done/error events. The provider
+    chain is walked best-first (rank 0 first); a provider that fails is put on
+    cooldown and the next one takes over — even mid-task.
+    """
     message = body.get("message")
     if not isinstance(message, str) or not message.strip():
-        return JSONResponse({"error": "message is required", "code": "bad_request"},
-                            status_code=400)
+        yield {"type": "error", "error": "message is required", "code": "bad_request",
+               "status": 400}
+        return
 
     pid = body.get("provider") if isinstance(body.get("provider"), str) else ""
-    if (missing := _provider_error(pid)) is not None:
-        return missing
     provider = resolve_provider(pid)
+    if provider is None:
+        known = ", ".join(load_providers()) or "none configured"
+        yield {"type": "error", "error": f"no provider '{pid}' (configured: {known})",
+               "code": "provider_not_found", "status": 404}
+        return
     wanted_model = body.get("model") if isinstance(body.get("model"), str) else ""
     if wanted_model.strip():
         provider = Provider(**{**provider.__dict__, "model": wanted_model.strip()[:120]})
@@ -1349,9 +1512,11 @@ async def chat(request: Request):
     try:
         assert_privacy(provider.base_url)
     except RuntimeError as err:
-        return JSONResponse({"error": str(err), "code": "privacy_mode_blocked"},
-                            status_code=403)
+        yield {"type": "error", "error": str(err), "code": "privacy_mode_blocked",
+               "status": 403}
+        return
 
+    task_id = uuid4().hex
     label = body.get("label") if isinstance(body.get("label"), str) else ""
     label = label or agent_label(message)
     history = body.get("history") if isinstance(body.get("history"), list) else []
@@ -1372,63 +1537,118 @@ async def chat(request: Request):
     extra_tools, problems = await _extra_tools()
 
     steps: list[dict[str, Any]] = []
-    async with _client(provider) as client:
+    fallbacks: list[dict[str, Any]] = []
+    yield {"type": "start", "task_id": task_id, "provider": provider.id,
+           "label": label, "extensions": problems}
+
+    chain = _ordered_chain(provider)
+    chain_ids = [p.id for p in chain]
+    last_error: Exception | None = None
+
+    for attempt_index, active in enumerate(chain):
+        switched = attempt_index > 0
+        if switched:
+            yield {"type": "fallback", "to": active.id, "model": active.model or None,
+                   "reason": getattr(last_error, "__class__.__name__", "error"),
+                   "attempted": chain_ids[:attempt_index]}
+
+        # Privacy check per chain member: a local-only deploy must never
+        # silently leak a prompt to a remote fallback.
         try:
-            model = await _resolve_model(provider, client)
-            # A budget of 0 means unlimited: the loop ends only when the model
-            # stops calling tools or calls `finish` itself.
-            budget = config.AGENTBOX_MAX_STEPS
-            remaining = math.inf if budget <= 0 else budget
-            used = 0
-            while used < remaining:
-                used += 1
-                reply = await _chat(client, model, messages, extra_tools=extra_tools)
-                calls = _tool_calls(reply)
-                messages.append({k: v for k, v in reply.items() if v is not None})
-
-                if not calls:
-                    return {"ok": True, "model": model, "provider": provider.id,
-                            "reply": str(reply.get("content") or "").strip(),
-                            "steps": steps, "extensions": problems}
-
-                for call in calls:
-                    try:
-                        result = await run_tool(call["name"], call["args"], label)
-                    except TerminalError as err:
-                        result = {"error": str(err), "code": err.code}
-                    except Exception as err:            # a tool must never kill the run
-                        result = {"error": f"{err.__class__.__name__}: {err}"}
-                    steps.append({"tool": call["name"], "args": call["args"], "result": result})
-                    messages.append({"role": "tool", "tool_call_id": call["id"],
-                                     "content": _cap(json.dumps(result))})
-
-                    # `finish` is the agent's own "I am done" button; its summary
-                    # is the answer, and the loop ends whether or not the model
-                    # stops calling tools.
-                    if call["name"] == "finish":
-                        summary = str(call["args"].get("summary") or "").strip()
-                        return {"ok": True, "model": model, "provider": provider.id,
-                                "reply": summary or "Done.", "steps": steps,
-                                "extensions": problems}
-        except httpx.HTTPError as err:
-            return JSONResponse(
-                {"error": f"the model endpoint is not answering ({err.__class__.__name__}).",
-                 "code": "agentbox_unreachable"},
-                status_code=502,
-            )
+            assert_privacy(active.base_url)
         except RuntimeError as err:
-            return JSONResponse({"error": str(err), "code": "agentbox_error"},
-                                status_code=502)
+            last_error = err
+            continue
 
-    # A finite budget ran out — say so honestly instead of pretending it worked.
-    # With the default unlimited budget this line is unreachable: the only way
-    # out of the loop above is a finished answer or an exception.
-    return JSONResponse(
-        {"error": f"the agent hit its {config.AGENTBOX_MAX_STEPS}-step budget; "
-                  "unset AGENT_LINUX_AGENTBOX_MAX_STEPS (0 = unlimited) or ask for something smaller.",
-         "code": "agentbox_budget_exhausted", "steps": steps},
-        status_code=200,
-    )
+        async with _client(active) as client:
+            try:
+                model = await _resolve_model(active, client)
+                yield {"type": "provider_start", "provider": active.id, "model": model,
+                       "switched": switched}
+                budget = config.AGENTBOX_MAX_STEPS
+                remaining = math.inf if budget <= 0 else budget
+                used = 0
+                while used < remaining:
+                    used += 1
+                    reply = await _chat(client, model, messages, extra_tools=extra_tools)
+                    calls = _tool_calls(reply)
+                    messages.append({k: v for k, v in reply.items() if v is not None})
+                    mark_provider_ok(active.id)
+
+                    if not calls:
+                        yield {"type": "done", "task_id": task_id, "model": model,
+                               "provider": active.id,
+                               "reply": str(reply.get("content") or "").strip(),
+                               "steps": steps, "fallbacks": fallbacks,
+                               "extensions": problems}
+                        return
+
+                    for call in calls:
+                        try:
+                            result = await run_tool(call["name"], call["args"], label)
+                        except TerminalError as err:
+                            result = {"error": str(err), "code": err.code}
+                        except Exception as err:            # a tool must never kill the run
+                            result = {"error": f"{err.__class__.__name__}: {err}"}
+                        step = {"tool": call["name"], "args": call["args"], "result": result}
+                        steps.append(step)
+                        yield {"type": "step", "step": step}
+                        messages.append({"role": "tool", "tool_call_id": call["id"],
+                                         "content": _cap(json.dumps(result))})
+
+                        # `finish` is the agent's own "I am done" button; its summary
+                        # is the answer, and the loop ends whether or not the model
+                        # stops calling tools.
+                        if call["name"] == "finish":
+                            summary = str(call["args"].get("summary") or "").strip()
+                            yield {"type": "done", "task_id": task_id, "model": model,
+                                   "provider": active.id,
+                                   "reply": summary or "Done.", "steps": steps,
+                                   "fallbacks": fallbacks, "extensions": problems}
+                            return
+
+            except (httpx.HTTPError, RuntimeError) as err:
+                # This provider stumbled — cool it down and let the next in the
+                # chain take the task. Steps already taken are kept: the next
+                # provider receives the whole conversation so far.
+                kind = _classify_failure(err)
+                mark_provider_failed(active.id)
+                fallbacks.append({"from": active.id, "reason": kind,
+                                  "detail": str(err)[:200]})
+                last_error = err
+                log.warning("agentbox provider %s failed (%s): %s",
+                            active.id, kind, str(err)[:200])
+                continue
+
+    # Every provider in the chain failed — say so honestly.
+    tried = ", ".join(chain_ids) or provider.id
+    yield {"type": "error", "task_id": task_id,
+           "error": f"every model endpoint failed ({tried}): "
+                    f"{last_error.__class__.__name__}: {str(last_error)[:200]}",
+           "code": "agentbox_unreachable", "status": 502,
+           "steps": steps, "fallbacks": fallbacks}
+
+
+@router.post("/chat/stream")
+async def chat_stream(request: Request):
+    """The same agent turn as Server-Sent Events: start, provider_start,
+    step, fallback and done — live, as they happen."""
+    if (missing := agentbox_configured_response()) is not None:
+        return missing
+    body = await _body(request)
+
+    async def gen() -> AsyncIterator[str]:
+        try:
+            async for event in _agent_run(body):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:      # the client hung up; stop quietly
+            raise
+        except Exception as err:            # the stream must never die silently
+            yield f"data: {json.dumps({'type': 'error', 'error': f'{err.__class__.__name__}: {err}', 'code': 'agentbox_error'})}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 @router.get("/providers")
@@ -1436,12 +1656,15 @@ async def list_providers():
     """Every custom provider the agent can use, with keys masked."""
     providers = load_providers()
     active = default_provider()
+    ranked = sorted(providers.values(), key=lambda p: (p.rank, p.id))
     return {
         "ok": True,
         "active": active.id if active else None,
         "registry": str(registry_path()),
+        "auto_fallback": bool(config.AGENTBOX_AUTO_FALLBACK),
+        "cooldowns": provider_cooldowns(),
         "providers": [{**p.public(), "active": bool(active and p.id == active.id)}
-                      for p in providers.values()],
+                      for p in ranked],
     }
 
 
@@ -1456,6 +1679,7 @@ async def add_provider(request: Request):
             api_key=str(body.get("api_key") or ""),
             model=str(body.get("model") or ""),
             label=str(body.get("label") or ""),
+            rank=int(body.get("rank") or 0),
         )
     except ValueError as err:
         return JSONResponse({"error": str(err), "code": "bad_request"}, status_code=400)

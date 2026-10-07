@@ -502,6 +502,9 @@
           : `called ${stepObj.tool || 'a tool'}`;
         if (box) box.scrollTop = box.scrollHeight;
       },
+      note(text) {
+        if (text) line.textContent = text;
+      },
       done(ok) {
         clearInterval(tick);
         card.classList.add('done');
@@ -663,7 +666,7 @@
     state.providers.forEach((p) => {
       const row = el('div', 'prov' + (p.id === state.provider ? ' active' : ''));
       row.append(el('b', '', p.id));
-      row.append(el('span', 'u', `${p.base_url}${p.model ? ' · ' + p.model : ''}${p.has_key ? ' · ' + p.api_key : ''}`));
+      row.append(el('span', 'u', `${p.base_url}${p.model ? ' · ' + p.model : ''}${p.has_key ? ' · ' + p.api_key : ''}${p.rank ? ' · fb#' + p.rank : ''}`));
       row.append(btn(p.id === state.provider ? 'active' : 'use', () => {
         state.provider = p.id;
         state.model = state.modelByProvider[p.id] || 'auto';
@@ -672,6 +675,11 @@
         renderProviders();
         loadModels();
         toast(`provider → ${p.id}`, 'ok');
+      }));
+      row.append(btn('rank', async () => {
+        const next = Math.max(0, parseInt(global.prompt(`fallback rank for ${p.id} (0 = tried first):`, String(p.rank || 0)), 10) || 0);
+        await json(`${AGENT}/providers`, { method: 'POST', body: JSON.stringify({ id: p.id, base_url: p.base_url, model: p.model || '', rank: next }) });
+        loadProviders();
       }));
       row.append(btn('×', async () => {
         await api(`${AGENT}/providers/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
@@ -705,13 +713,14 @@
       base_url: $('p_url').value.trim(),
       model: $('p_model').value.trim(),
       api_key: $('p_key').value,
+      rank: Math.max(0, parseInt(($('p_rank') || {}).value || '0', 10) || 0),
     };
     const { status, body } = await json(`${AGENT}/providers`, { method: 'POST', body: JSON.stringify(payload) });
     if (status !== 200) { toast(body.error || `HTTP ${status}`, 'err'); return; }
     $('p_key').value = '';
     state.provider = body.provider.id;
     loadProviders();
-    toast(`provider ${body.provider.id} saved`, 'ok');
+    toast(`provider ${body.provider.id} saved (rank ${body.provider.rank || 0})`, 'ok');
   }
 
   async function loadLocalEngines() {
@@ -753,14 +762,13 @@
       .map((m) => ({ role: m.role, content: m.content }));
   }
 
-  async function ask(message, opts) {
+async function ask(message, opts) {
     const options = opts || {};
     const topic = currentTopic();
     if (!options.skipUser) addMsg(topic, 'user', message);
     renderChat();
     setComposerState('working');
     const think = sayReasoning(options.skipUser ? 'rethinking the last answer…' : 'analysing the task…');
-
     const payload = { message, history: historyForApi(), provider: state.provider || undefined };
     if (state.model && state.model !== 'auto') payload.model = state.model;
     const asst = activeAssistant();
@@ -773,7 +781,78 @@
       state.attachments = [];
       renderAttachments();
     }
+    // Live stream first; if SSE cannot even start (proxy, older backend), fall
+    // back to the classic one-shot JSON call so ask() never breaks.
+    const streamOk = await askStream(payload, think, topic);
+    if (!streamOk) await askOnce(payload, think, topic);
+    setComposerState('ready');
+    loadSessions();
+    renderList();
+  }
 
+  async function askStream(payload, think, topic) {
+    let res;
+    try {
+      res = await api(`${AGENT}/chat/stream`, { method: 'POST', body: JSON.stringify(payload) });
+    } catch (e) { return false; }
+    if (!res.ok || !res.body || res.headers.get('content-type').indexOf('text/event-stream') < 0) return false;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let done = false;
+    let error = null;
+    const imgs = [];
+    const providerTag = (p) => (p ? ` · ${p}` : '');
+    for (;;) {
+      const { value, done: eof } = await reader.read().catch(() => ({ done: true }));
+      if (eof) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const line = chunk.split('\n').find((l) => l.startsWith('data: '));
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(6)); } catch (e) { continue; }
+        if (ev.type === 'start' && ev.label) think.note(`${ev.label}${providerTag(ev.provider)}`);
+        else if (ev.type === 'provider_start') {
+          think.note(`${ev.switched ? 'switched to' : 'thinking with'} ${ev.provider} · ${ev.model || 'auto'}`);
+          state.lastProviderUsed = ev.provider;
+        } else if (ev.type === 'step') {
+          think.step(ev.step);
+          const p = ev.step && ev.step.result && ev.step.result.path;
+          if (typeof p === 'string' && /\.(png|jpe?g)$/i.test(p)) imgs.push(fileUrl(p));
+        } else if (ev.type === 'fallback') {
+          think.note(`⚡ ${ev.to} took over${ev.reason ? ' (' + ev.reason + ')' : ''}`);
+        } else if (ev.type === 'done') {
+          done = true;
+          const steps = ev.steps || [];
+          steps.forEach((s) => { if (s && s.result && s.result.path && typeof s.result.path === 'string' && /\.(png|jpe?g)$/i.test(s.result.path)) imgs.push(fileUrl(s.result.path)); });
+          addMsg(topic, 'assistant', ev.reply || '(no reply)', { imgs: dedupe(imgs) });
+          renderChat();
+        } else if (ev.type === 'error') {
+          error = ev.error || 'the agent failed.';
+        }
+      }
+    }
+    if (error) {
+      think.done(false);
+      addMsg(topic, 'assistant', '⚠ ' + error);
+      renderChat();
+      toast(error, 'err');
+      return true;
+    }
+    if (!done) return false;      // stream ended without a done event — use JSON path
+    think.done(true);
+    return true;
+  }
+
+  function dedupe(arr) {
+    return Array.from(new Set(arr));
+  }
+
+  async function askOnce(payload, think, topic) {
     const { status, body } = await json(`${AGENT}/chat`, {
       method: 'POST', body: JSON.stringify(payload),
     });
@@ -783,7 +862,6 @@
       addMsg(topic, 'assistant', '⚠ ' + text);
       renderChat();
       toast(text, 'err');
-      setComposerState('ready');
       return;
     }
     (body.steps || []).forEach((s) => think.step(s));
@@ -795,9 +873,6 @@
       .map((p) => fileUrl(p));
     addMsg(topic, 'assistant', body.reply || '(no reply)', { imgs: imgs.length ? imgs : undefined });
     renderChat();
-    setComposerState('ready');
-    loadSessions();
-    renderList();
   }
 
   function regenerate() {
@@ -2729,7 +2804,7 @@
   const AgentLinuxConsole = {
     state, screen, api, json, toast, applyTheme, showView, renderList,
     loadSessions, newSession, closeSession, select,
-    ask, regenerate, newTopic, deleteTopic, selectTopic, currentTopic,
+    ask, askStream, askOnce, regenerate, newTopic, deleteTopic, selectTopic, currentTopic,
     loadProviders, renderProviders, loadModels, saveProviderForm,
     generatePainting, renderPaintings, openLightbox, closeLightbox,
     paletteOpen, paletteClose, paletteRender, paletteCommands,
