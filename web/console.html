@@ -72,14 +72,17 @@ body { margin: 0; background: var(--bg); color: var(--fg); overflow: hidden;
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 99px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-#app { position: relative; z-index: 1; display: flex; height: 100%; min-height: 0; }
+/* No z-index here on purpose: #app must not create a stacking context, or the
+   mobile drawer, its backdrop and the rail could never be layered against each
+   other — the backdrop would cover the rail and every tap would die on it. */
+#app { position: relative; display: flex; height: 100%; min-height: 0; }
 
 /* rail */
 .rail { width: var(--rail-w); flex: none; display: flex; flex-direction: column; align-items: center;
   gap: 6px; padding: 10px 0 8px; border-right: 1px solid var(--line);
-  background: color-mix(in srgb, var(--bg-2) 88%, transparent);
-  /* above the mobile drawer backdrop (35) and drawer (40): the icons stay
-     tappable even when the list column is open as an overlay */
+  background: var(--bg-2);
+  /* Above the mobile drawer (40) and its backdrop (35). The rail must never
+     lose its own taps — on a phone it is the only way to close the drawer. */
   position: relative; z-index: 45; }
 .rail .logo { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; margin-bottom: 8px;
   background: linear-gradient(140deg, var(--acc), color-mix(in srgb, var(--acc) 55%, #fff));
@@ -435,8 +438,9 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
   .hide-sm { display: initial; }
   @media (max-width: 980px) { :root { --list-w: 220px; } }
   @media (max-width: 900px) {
-    /* the list column becomes a drawer that slides over the content; the
-       rail stays visible and above it, so its icons remain tappable */
+    /* The list column becomes a drawer that slides over the content, dimmed
+       by a backdrop. Layer order, all in the root stacking context now that
+       #app creates none: backdrop 35 < drawer 40 < rail 45. */
     .list-col { position: fixed; left: var(--rail-w); top: 0; bottom: 0; z-index: 40;
       background: var(--bg-2); transform: translateX(-105%); transition: transform .2s ease;
       box-shadow: 20px 0 60px -30px rgba(0,0,0,.7); }

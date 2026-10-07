@@ -192,32 +192,41 @@
   /** True when the list column renders as a slide-over drawer. */
   function isNarrow() { return global.innerWidth <= 900; }
 
+  /** Seat the sidebar classes for the current screen size.
+   *  Mobile: the drawer starts CLOSED — the chat is the main surface, and the
+   *  toggle or a rail icon slides the list over it. Desktop: the column is
+   *  shown or hidden by the remembered preference. */
+  function seatSidebar() {
+    if (isNarrow()) {
+      document.body.classList.remove('side-collapsed');
+      document.body.classList.remove('list-open');
+      return;
+    }
+    document.body.classList.remove('list-open');
+    document.body.classList.toggle('side-collapsed',
+      store.get('agent_linux_sidebar', 'open') === 'collapsed');
+  }
+
   function applySidebar(open) {
-    // Desktop: open shows the column, collapsed hides it. Mobile: the column
-    // is always a drawer — `open` only decides whether it is slid in or out,
-    // so a phone never loses the drawer behind a collapsed state.
-    document.body.classList.toggle('side-collapsed', !open);
-    if (isNarrow()) document.body.classList.add('list-open');
+    if (isNarrow()) {
+      document.body.classList.remove('side-collapsed');
+      document.body.classList.toggle('list-open', open);
+    } else {
+      document.body.classList.remove('list-open');
+      document.body.classList.toggle('side-collapsed', !open);
+    }
     const t = $('sideToggle');
     if (t) t.setAttribute('aria-pressed', String(open));
     store.set('agent_linux_sidebar', open ? 'open' : 'collapsed');
   }
+
   function sidebarOpen() {
-    // The drawer itself is present either way; `open` says whether the list
-    // column is (or would be) expanded.
-    return !document.body.classList.contains('side-collapsed');
+    return isNarrow()
+      ? document.body.classList.contains('list-open')
+      : !document.body.classList.contains('side-collapsed');
   }
+
   function toggleSidebar() {
-    if (isNarrow()) {
-      // On a phone the drawer slides out over a dimmed backdrop; the rail
-      // stays above it so the toggle and the other icons remain tappable.
-      const open = document.body.classList.contains('list-open');
-      document.body.classList.toggle('list-open', !open);
-      store.set('agent_linux_sidebar', !open ? 'open' : 'collapsed');
-      const t = $('sideToggle');
-      if (t) t.setAttribute('aria-pressed', String(!open));
-      return;
-    }
     applySidebar(!sidebarOpen());
   }
 
@@ -2305,10 +2314,10 @@
     document.querySelectorAll('.rbtn[data-view]').forEach((node) => {
       on(node, 'click', () => {
         showView(node.dataset.view);
-        if (isNarrow()) {
-          // on a phone the view list rides the drawer — slide it in when a
-          // view is picked; the toggle button closes it again
-          document.body.classList.add('list-open');
+        if (isNarrow() && !document.body.classList.contains('list-open')) {
+          // the view lists ride the drawer on a phone — slide it in; the
+          // toggle, a tap outside, or Escape slides it back
+          applySidebar(true);
         }
       });
     });
@@ -2323,10 +2332,13 @@
       if (isNarrow() && e.target.closest('.litem')) document.body.classList.remove('list-open');
     });
     on($('listSearch'), 'input', () => renderList());
-    // tapping the dimmed content behind the drawer closes it
-    on($('app'), 'click', (e) => {
+    // tapping the dimmed backdrop (body::after) or any content behind the
+    // drawer closes it — the backdrop's click targets body, so listen at the
+    // document level, not on #app
+    on(global.document, 'click', (e) => {
       if (!isNarrow() || !document.body.classList.contains('list-open')) return;
       const t = e.target;
+      if (!(t instanceof global.Element)) return;
       if (t.closest('.list-col') || t.closest('.rail')) return;
       document.body.classList.remove('list-open');
     });
@@ -2528,9 +2540,7 @@
     on(global, 'resize', () => {
       screen.fit();
       postResize();
-      // crossing the drawer breakpoint: re-seat the sidebar so a desktop
-      // "collapsed" never leaves the phone drawer stuck open (or vice versa)
-      applySidebar(isNarrow() ? true : store.get('agent_linux_sidebar', 'open') !== 'collapsed');
+      seatSidebar();   // crossing the breakpoint re-seats; no frozen drawer states
     });
     wireSettings();
   }
@@ -2547,9 +2557,7 @@
     loadPaintings();
     state.historyTurns = Math.max(0, Math.min(50, parseInt(store.get('agent_linux_history', '12'), 10) || 12));
     applyTheme(store.get('agent_linux_theme', 'cherry'));
-    // On a phone the list column is a drawer; keep it slid out at boot so the
-    // app never opens looking frozen behind a drawer state.
-    applySidebar(isNarrow() ? true : store.get('agent_linux_sidebar', 'open') !== 'collapsed');
+    seatSidebar();
     wire();
     buildTerminal();
     setLink(null, 'linking');
