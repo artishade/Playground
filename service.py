@@ -50,6 +50,7 @@ from agent_linux.extensions import router as extensions_router
 from agent_linux.browser_api import router as browser_router
 from agent_linux.agent_x_api import router as agent_x_router
 from agent_linux.credentials import router as credentials_router
+from agent_linux.project_brain import router as brain_router
 from agent_linux.env import describe as env_describe
 from agent_linux.store import describe as store_describe
 from agent_linux import vault_backup
@@ -243,6 +244,12 @@ app.include_router(credentials_router, prefix="/agent", tags=["credentials"])
 # HTTP contract the console and peers use.
 app.include_router(agent_x_router, prefix="/agent/x", tags=["agent-x"])
 
+# The Project Brain — the built-in, zero-key project mind: PROJECT_MAP +
+# MEMORY + a live symbol index, answering project questions with no model and
+# no API key. Other agents (Claude Code, Codex, peers) call /agent/brain/ask
+# before reading a single file.
+app.include_router(brain_router, prefix="/agent/brain", tags=["project-brain"])
+
 # The config side-car — what a redeploy must not be able to take from you.
 # GET /agent/backup, POST /agent/backup/snapshot, POST /agent/backup/restore.
 app.include_router(vault_backup.router, prefix="/agent", tags=["backup"])
@@ -307,6 +314,14 @@ async def health():
         }
     except Exception as err:                      # noqa: BLE001
         agentx_report = {"enabled": False, "error": f"{err.__class__.__name__}: {err}"}
+    # Project Brain — the zero-key project mind (never fails the health poll).
+    try:
+        from agent_linux.project_brain import brain_status as _brain_status
+
+        brain_report = _brain_status()
+        brain_report["enabled"] = brain_report.get("map_present", False)
+    except Exception as err:                      # noqa: BLE001
+        brain_report = {"enabled": False, "error": f"{err.__class__.__name__}: {err}"}
     return JSONResponse({
         "ok": ok,
         "status": "healthy" if ok else "degraded",
@@ -322,6 +337,7 @@ async def health():
         "auth_required": bool(TERMINAL_SERVICE_TOKEN),
         "agentbox": agentbox_status(),
         "agent_x": agentx_report,
+        "brain": brain_report,
         "store": store_describe(),
         "backup": {
             "key": vault_backup.SNAPSHOT_KEY,

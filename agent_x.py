@@ -551,9 +551,22 @@ class AgentX:
         if kind == "task":
             await self.mesh.task(title=str(payload.get("title") or "delegated task"),
                                  goal=str(payload.get("goal") or ""), status="open")
-        return {"ok": True, "received": stored["mid"],
-                "from": sender_id, "kind": kind,
-                "protocol": PROTOCOL}
+        # Project Brain: a peer's plain-text question gets answered in the ack by
+        # the zero-key Brain - Claude/Codex/peers can ask the project directly.
+        ack: dict[str, Any] = {"ok": True, "received": stored["mid"],
+                               "from": sender_id, "kind": kind,
+                               "protocol": PROTOCOL}
+        if kind == "message":
+            question = str(payload.get("question") or payload.get("text") or "").strip()
+            if question:
+                try:
+                    from .project_brain import brain_ask
+
+                    ack["brain_answer"] = brain_ask(question)
+                except Exception as err:  # noqa: BLE001 — a brain hiccup never breaks P2P
+                    ack["brain_answer"] = {"ok": False,
+                                           "error": f"{err.__class__.__name__}: {err}"}
+        return ack
 
     # ---- self online visit -------------------------------------------------
     async def online_visit(self, url: str, brief: str = "",
@@ -714,6 +727,22 @@ class AgentX:
             recent = lessons[-3:]
             lines.append("Recent lessons: " + " | ".join(
                 (l.get("text") or "")[:80] for l in recent))
+        # The Brain: the mesh's own zero-key project oracle.
+        try:
+            from .project_brain import brain_status
+
+            status = brain_status()
+            if status.get("map_present"):
+                lines += [
+                    "",
+                    "Project Brain: this repo has a zero-key mind at /agent/brain — "
+                    "GET /agent/brain/ask?q=... answers project questions "
+                    "deterministically (no model, no key). POST /agent/brain/remember "
+                    "teaches it one fact. Peers that send an agentx/1.0 message "
+                    "envelope with payload.question get brain_answer in the ack.",
+                ]
+        except Exception:  # noqa: BLE001 — brain down is not fatal to the mesh
+            pass
         return "\n".join(lines)
 
 # --------------------------------------------------------------------------- #

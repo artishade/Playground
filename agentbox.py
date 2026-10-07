@@ -311,6 +311,37 @@ TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "project_ask",
+            "description": ("Ask the Project Brain — the zero-key built-in mind for THIS "
+                            "codebase — a question about the project: architecture, modules, "
+                            "routes, past fixes, conventions, next steps. It answers "
+                            "deterministically from PROJECT_MAP.md + MEMORY.md + a live symbol "
+                            "index, with no model call. Ask BEFORE reading files wholesale; "
+                            "it returns the exact sections and code pointers you need."),
+            "parameters": _schema({
+                "question": {"type": "string",
+                             "description": "A project question, e.g. 'how does provider "
+                                            "fallback work' or 'what fixed the streaming bug'."},
+            }, ["question"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "brain_remember",
+            "description": ("Teach the Project Brain one durable fact — a fix you just made, "
+                            "a decision, a lesson. It is appended to the project MEMORY.md so "
+                            "the next agent never repeats the work. Use at the end of any "
+                            "non-trivial change."),
+            "parameters": _schema({
+                "area": {"type": "string", "description": "Short area tag, e.g. 'agentbox'."},
+                "note": {"type": "string", "description": "The fact, one or two sentences."},
+            }, ["note"]),
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "account_env",
             "description": ("Run a shell command with a saved account's credentials in its "
                             "environment — e.g. a Cloudflare account gives the command "
@@ -434,6 +465,18 @@ async def run_tool(name: str, args: dict[str, Any], label: str) -> Any:
 
     if name in ("accounts", "account_env"):
         return await _account_tool(name, args)
+
+    if name == "project_ask":
+        from .project_brain import brain_ask
+
+        return brain_ask(str(args.get("question") or ""))
+
+    if name == "brain_remember":
+        from .project_brain import _remember
+
+        return _remember(area=str(args.get("area") or "agentbox"),
+                         note=str(args.get("note") or ""),
+                         source="agentbox_tool")
 
     return {"error": f"unknown tool: {name}"}
 
@@ -1328,6 +1371,23 @@ async def _system_prompt(override: str = "") -> str:
         if block:
             parts.append(block)
     except Exception:                             # noqa: BLE001 — mesh down is not fatal
+        pass
+    # The Project Brain — the agent always knows it can ask before it reads.
+    try:
+        from .project_brain import brain_status
+
+        status = brain_status()
+        if status.get("map_present"):
+            parts.append(
+                "## Project Brain - the built-in project mind\n"
+                "This codebase has a zero-key Brain (no model, no API key). Before "
+                "reading files wholesale, call the `project_ask` tool with your "
+                "project question - it returns the exact map sections and code "
+                "pointers (file:line) you need. After a structural change, call "
+                "`brain_remember` with what you changed so the next agent starts "
+                "where you stopped."
+            )
+    except Exception:                             # noqa: BLE001 — brain down is not fatal
         pass
     return "\n\n".join(parts)
 
