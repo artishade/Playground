@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en" data-theme="cherry">
+<html lang="en" data-theme="nova">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0d0d12">
+<meta name="theme-color" content="#000000">
 <meta name="color-scheme" content="dark light">
 <meta name="description" content="Agent_Linux — a root cloud shell with an AI agent beside it.">
 <title>Agent_Linux</title>
@@ -15,9 +15,10 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
 <style>
-/* Agent_Linux console · Cherry Studio-style skin.
+/* Agent_Linux console · Pitch-black dark mode skin.
    Layout: icon rail · list column · content view. Chat-first; the terminal,
-   live browser and paintings one keystroke away. Zero dependencies. */
+   live browser and paintings one keystroke away. Zero dependencies.
+   Every theme uses true pitch black (#000000) as the base. */
 :root {
   --acc: #eb5757; --acc-soft: rgba(235,87,87,.14); --acc-line: rgba(235,87,87,.38);
   --acc2: #e05e6f; --ok: #34c77b; --warn: #f2a33c; --err: #ef5e6e;
@@ -25,12 +26,25 @@
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --disp: "Space Grotesk", Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif;
 }
+/* 1. NOVA — Pure Pitch Black (default) — Electric Blue accent */
+html[data-theme="nova"] {
+  --acc: #3b82f6; --acc2: #06b6d4;
+  --acc-soft: rgba(59,130,246,.14); --acc-line: rgba(59,130,246,.38);
+  --bg: #000000; --bg-2: #0a0a0b; --bg-3: #121214;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
+  --line: rgba(255,255,255,.06); --line-2: rgba(255,255,255,.14);
+  --fg: #f0f0f2; --dim: #a0a0ab; --dim-2: #6e6e7a;
+  --term-bg: #000000; --term-fg: #cdd2e0;
+}
+/* 2. CHERRY — Classic Red accent */
 html[data-theme="cherry"] {
-  --bg: #0d0d12; --bg-2: #101017; --bg-3: #14141c;
-  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.06);
-  --line: rgba(255,255,255,.08); --line-2: rgba(255,255,255,.16);
+  --acc: #eb5757; --acc2: #e05e6f;
+  --acc-soft: rgba(235,87,87,.14); --acc-line: rgba(235,87,87,.38);
+  --bg: #000000; --bg-2: #0d0d12; --bg-3: #121218;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
+  --line: rgba(255,255,255,.07); --line-2: rgba(255,255,255,.15);
   --fg: #eceef4; --dim: #9aa0b2; --dim-2: #626879;
-  --term-bg: #0d0d12; --term-fg: #cdd2e0;
+  --term-bg: #000000; --term-fg: #cdd2e0;
 }
 html[data-theme="cherry-light"] {
   --bg: #f4f4f8; --bg-2: #ffffff; --bg-3: #ffffff;
@@ -40,27 +54,56 @@ html[data-theme="cherry-light"] {
   --acc-soft: rgba(235,87,87,.10); --acc-line: rgba(235,87,87,.32);
   --term-bg: #ffffff; --term-fg: #2a2c36;
 }
+/* 3. OBSIDIAN — Royal Purple accent */
 html[data-theme="obsidian"] {
   --acc: #7c5cff; --acc2: #22d3ee;
   --acc-soft: rgba(124,92,255,.14); --acc-line: rgba(124,92,255,.38);
-  --bg: #05060c; --bg-2: #080a14; --bg-3: #0b0e1a;
-  --panel: rgba(255,255,255,.03); --panel-2: rgba(255,255,255,.055);
+  --bg: #000000; --bg-2: #0a0a0f; --bg-3: #10101c;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
   --line: rgba(255,255,255,.075); --line-2: rgba(255,255,255,.16);
   --fg: #e9edf8; --dim: #8d95ab; --dim-2: #5d6579;
-  --term-bg: #05060c; --term-fg: #cbd5e1;
+  --term-bg: #000000; --term-fg: #cbd5e1;
 }
-html[data-theme="plasma"] { --acc:#ff3ea5; --acc2:#8b5cf6; --acc-soft:rgba(255,62,165,.14); --acc-line:rgba(255,62,165,.38);
-  --bg:#0a0510; --bg-2:#120820; --bg-3:#180b2a; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
-  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#0a0510; --term-fg:#e6d9f5; }
-html[data-theme="matrix"] { --acc:#3ee07f; --acc2:#a3e635; --acc-soft:rgba(62,224,127,.14); --acc-line:rgba(62,224,127,.38);
-  --bg:#040a07; --bg-2:#06130c; --bg-3:#081a10; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
-  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#040a07; --term-fg:#c8f7d6; }
-html[data-theme="glacier"] { --acc:#38bdf8; --acc2:#818cf8; --acc-soft:rgba(56,189,248,.14); --acc-line:rgba(56,189,248,.38);
-  --bg:#040810; --bg-2:#071223; --bg-3:#0a1830; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
-  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#040810; --term-fg:#cfe3ff; }
-html[data-theme="ember"] { --acc:#fb923c; --acc2:#f43f5e; --acc-soft:rgba(251,146,60,.14); --acc-line:rgba(251,146,60,.38);
-  --bg:#0c0705; --bg-2:#160c08; --bg-3:#1d0f0a; --panel:rgba(255,255,255,.03); --panel-2:rgba(255,255,255,.055);
-  --line:rgba(255,255,255,.075); --line-2:rgba(255,255,255,.16); --fg:#e9edf8; --dim:#8d95ab; --dim-2:#5d6579; --term-bg:#0c0705; --term-fg:#f6ddd0; }
+/* 4. PLASMA — Hot Pink / Violet accent */
+html[data-theme="plasma"] {
+  --acc: #ff3ea5; --acc2: #8b5cf6;
+  --acc-soft: rgba(255,62,165,.14); --acc-line: rgba(255,62,165,.38);
+  --bg: #000000; --bg-2: #0a0510; --bg-3: #1a0a2a;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
+  --line: rgba(255,255,255,.075); --line-2: rgba(255,255,255,.16);
+  --fg: #e9edf8; --dim: #8d95ab; --dim-2: #5d6579;
+  --term-bg: #000000; --term-fg: #e6d9f5;
+}
+/* 5. MATRIX — Neon Green accent */
+html[data-theme="matrix"] {
+  --acc: #3ee07f; --acc2: #a3e635;
+  --acc-soft: rgba(62,224,127,.14); --acc-line: rgba(62,224,127,.38);
+  --bg: #000000; --bg-2: #040a07; --bg-3: #0b1a14;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
+  --line: rgba(255,255,255,.075); --line-2: rgba(255,255,255,.16);
+  --fg: #e9edf8; --dim: #8d95ab; --dim-2: #5d6579;
+  --term-bg: #000000; --term-fg: #c8f7d6;
+}
+/* 6. GLACIER — Ice Blue accent */
+html[data-theme="glacier"] {
+  --acc: #38bdf8; --acc2: #818cf8;
+  --acc-soft: rgba(56,189,248,.14); --acc-line: rgba(56,189,248,.38);
+  --bg: #000000; --bg-2: #040810; --bg-3: #0a1830;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
+  --line: rgba(255,255,255,.075); --line-2: rgba(255,255,255,.16);
+  --fg: #e9edf8; --dim: #8d95ab; --dim-2: #5d6579;
+  --term-bg: #000000; --term-fg: #cfe3ff;
+}
+/* 7. EMBER — Burnt Orange / Coral accent */
+html[data-theme="ember"] {
+  --acc: #fb923c; --acc2: #f43f5e;
+  --acc-soft: rgba(251,146,60,.14); --acc-line: rgba(251,146,60,.38);
+  --bg: #000000; --bg-2: #0c0705; --bg-3: #1c0f0a;
+  --panel: rgba(255,255,255,.032); --panel-2: rgba(255,255,255,.07);
+  --line: rgba(255,255,255,.075); --line-2: rgba(255,255,255,.16);
+  --fg: #e9edf8; --dim: #8d95ab; --dim-2: #5d6579;
+  --term-bg: #000000; --term-fg: #f6ddd0;
+}
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -406,6 +449,9 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
   transition: border-color .15s, background .15s; }
 .drop:hover, .drop.over { border-color: var(--acc-line); background: var(--acc-soft); }
 
+/* footer */
+.footer-notice { flex: none; }
+
 /* toasts + palette */
 #toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: flex; flex-direction: column; gap: 8px; }
 .toast { border: 1px solid var(--line); background: color-mix(in srgb, var(--bg-3) 92%, transparent);
@@ -727,13 +773,14 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
           <div class="row3">
             <span>theme</span>
             <select id="theme">
-              <option value="cherry">cherry (dark)</option>
+              <option value="nova">nova (pitch black — default)</option>
+              <option value="cherry">cherry (classic red)</option>
               <option value="cherry-light">cherry (light)</option>
-              <option value="obsidian">obsidian</option>
-              <option value="plasma">plasma</option>
-              <option value="matrix">matrix</option>
-              <option value="glacier">glacier</option>
-              <option value="ember">ember</option>
+              <option value="obsidian">obsidian (purple)</option>
+              <option value="plasma">plasma (pink)</option>
+              <option value="matrix">matrix (green)</option>
+              <option value="glacier">glacier (blue)</option>
+              <option value="ember">ember (orange)</option>
             </select>
             <span></span>
           </div>
@@ -802,12 +849,16 @@ pre.plain { margin: 0; height: 100%; overflow: auto; white-space: pre-wrap; word
 
         <div class="card">
           <b>ABOUT</b>
-          <p class="lead">Agent_Linux console · Cherry-style skin · zero dependencies. APIs: <code>/terminal/pty</code>, <code>/agent</code>, <code>/agent/extensions</code>, <code>/agent/browser</code>.</p>
+          <p class="lead">Agent_Linux console · Pitch-black dark mode · zero dependencies. APIs: <code>/terminal/pty</code>, <code>/agent</code>, <code>/agent/extensions</code>, <code>/agent/browser</code>.</p>
         </div>
       </div>
     </section>
   </main>
 </div>
+
+<footer class="footer-notice" style="padding:6px 12px; text-align:center; font:10px var(--mono); color:var(--dim-2); border-top:1px solid var(--line);">
+  AI-generated content, for Experiment only
+</footer>
 
 <div id="toasts" aria-live="polite"></div>
 <div id="lightbox" hidden><img id="lightboxImg" alt=""></div>

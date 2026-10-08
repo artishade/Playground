@@ -1,5 +1,5 @@
 /**
- * Agent_Linux console — Cherry Studio-style client.
+ * Agent_Linux console — Pitch-black dark mode client.
  *
  * Views: chats · terminal · live browser · paintings · settings, behind an
  * icon rail and a context list column. Chats are topics (named, persisted in
@@ -7,6 +7,9 @@
  * a composer model/provider picker and attachments. The terminal keeps real
  * PTY tabs over SSE; the browser view streams a shared Chromium; paintings
  * call the agent's image endpoint and file library.
+ *
+ * Theming: every theme uses true pitch black (#000000) as the base background.
+ * Accent colors differentiate themes. Themes persist via localStorage.
  *
  * No framework, no build step, one file.
  */
@@ -19,15 +22,16 @@
   const BROWSER = '/agent/browser';
   const CRED = '/agent';
   const VIEWS = ['chats', 'terminal', 'browser', 'paintings', 'agentx', 'settings'];
-  const THEMES = ['cherry', 'cherry-light', 'obsidian', 'plasma', 'matrix', 'glacier', 'ember'];
+  const THEMES = ['nova', 'cherry', 'cherry-light', 'obsidian', 'plasma', 'matrix', 'glacier', 'ember'];
   const TERM_THEMES = {
-    'cherry':       { background: '#0d0d12', foreground: '#cdd2e0', cursor: '#eb5757', selectionBackground: '#eb575740' },
+    'nova':         { background: '#000000', foreground: '#cdd2e0', cursor: '#3b82f6', selectionBackground: '#3b82f640' },
+    'cherry':       { background: '#000000', foreground: '#cdd2e0', cursor: '#eb5757', selectionBackground: '#eb575740' },
     'cherry-light': { background: '#ffffff', foreground: '#2a2c36', cursor: '#eb5757', selectionBackground: '#eb575733' },
-    obsidian:       { background: '#05060c', foreground: '#cbd5e1', cursor: '#7c5cff', selectionBackground: '#7c5cff40' },
-    plasma:         { background: '#0a0510', foreground: '#e6d9f5', cursor: '#ff3ea5', selectionBackground: '#ff3ea540' },
-    matrix:         { background: '#040a07', foreground: '#c8f7d6', cursor: '#3ee07f', selectionBackground: '#3ee07f40' },
-    glacier:        { background: '#040810', foreground: '#cfe3ff', cursor: '#38bdf8', selectionBackground: '#38bdf840' },
-    ember:          { background: '#0c0705', foreground: '#f6ddd0', cursor: '#fb923c', selectionBackground: '#fb923c40' },
+    obsidian:       { background: '#000000', foreground: '#cbd5e1', cursor: '#7c5cff', selectionBackground: '#7c5cff40' },
+    plasma:         { background: '#000000', foreground: '#e6d9f5', cursor: '#ff3ea5', selectionBackground: '#ff3ea540' },
+    matrix:         { background: '#000000', foreground: '#c8f7d6', cursor: '#3ee07f', selectionBackground: '#3ee07f40' },
+    glacier:        { background: '#000000', foreground: '#cfe3ff', cursor: '#38bdf8', selectionBackground: '#38bdf840' },
+    ember:          { background: '#000000', foreground: '#f6ddd0', cursor: '#fb923c', selectionBackground: '#fb923c40' },
   };
   const DEFAULT_ASSISTANTS = [
     { id: 'agentbox', name: 'Agentbox', emoji: '📦', prompt: '' },
@@ -43,7 +47,7 @@
   const state = {
     token: '',
     view: 'chats',
-    theme: 'cherry',
+    theme: 'nova',
     // terminal
     sessions: [], active: null, offset: 0, stream: null, cols: 120, rows: 32,
     max: 8, retry: 0,
@@ -174,7 +178,7 @@
   // ---- theme ----------------------------------------------------------------------
 
   function applyTheme(name) {
-    state.theme = THEMES.indexOf(name) >= 0 ? name : 'cherry';
+    state.theme = THEMES.indexOf(name) >= 0 ? name : 'nova';
     document.documentElement.setAttribute('data-theme', state.theme);
     const pick = $('theme');
     if (pick) pick.value = state.theme;
@@ -2165,11 +2169,17 @@ async function ask(message, opts) {
       { icon: '⚿', label: 'Credentials drawer', hint: 'SSH · accounts', run: () => { const p = $('credPanel'); p.hidden = !p.hidden; if (!p.hidden) loadCredentials(); } },
       { icon: '⏻', label: 'Launch browser engine', run: () => { showView('browser'); browserStart(); } },
     ];
+    const THEME_LABELS = {
+      'nova': 'Nova (pitch black)', 'cherry': 'Cherry (red)', 'cherry-light': 'Cherry (light)',
+      'obsidian': 'Obsidian (purple)', 'plasma': 'Plasma (pink)', 'matrix': 'Matrix (green)',
+      'glacier': 'Glacier (blue)', 'ember': 'Ember (orange)'
+    };
     THEMES.forEach((t) => {
+      const label = THEME_LABELS[t] || t;
       cmds.push({
-        icon: '◑', label: `Theme: ${t}`,
+        icon: '◑', label: `Theme: ${label}`,
         hint: t === state.theme ? 'current' : '',
-        run: () => { applyTheme(t); toast(`theme: ${t}`, 'ok'); },
+        run: () => { applyTheme(t); toast(`theme: ${label}`, 'ok'); },
       });
     });
     state.providers.forEach((p) => {
